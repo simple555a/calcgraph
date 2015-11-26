@@ -12,8 +12,8 @@ check: test
 # pull in dependency info for *existing* .o files
 -include $(OBJS:.o=.d)
 
-CPPFLAGS += -std=c++14 -ferror-limit=3 -g
-CPPFLAGS += $(shell pkg-config --cflags cppunit)
+CPPFLAGS += -std=c++14 -ferror-limit=5 -g
+CPPFLAGS += $(shell pkg-config --cflags cppunit boost)
 
 # compile and generate dependency info;
 # more complicated dependency computation, so all prereqs listed

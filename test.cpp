@@ -1,51 +1,28 @@
 #include <cppunit/ui/text/TestRunner.h>
 #include <cppunit/extensions/HelperMacros.h>
-#include "calc.cpp"
-
-template<int GRAPH, typename INOUT>
-class TestExtractor : public calc::Extractor<GRAPH, INOUT, INOUT> {
-public:
-    const INOUT snap() {
-        return it.load();
-    }
-    void append(const INOUT& val, calc::WorkState<GRAPH>& ws) {
-        it.store(val);
-    }
-private:
-    std::atomic<INOUT> it;
-};
+#include "calc.h"
 
 class GraphTest final : public CppUnit::TestFixture  {
 public:
-    auto result() {
-        return std::shared_ptr<calc::Extractor<0, int, int>>(new TestExtractor<0, int>());
-    }
 
-    void testInput() {
-        calc::Graph<0> g;
-        auto input = g.input(1);
+    void testSingleNode() {
+        calc::Graph g;
+        std::atomic<int> res;
+        
+        auto node = g.node(
+            std::plus<int>(),
+            static_cast<calc::Connectable<int>*>(nullptr),
+            static_cast<calc::Connectable<int>*>(nullptr));
+        node->input<0>().append(g, 1);
+        node->input<1>().append(g, 2);
+        node->connect(calc::Input<int>(res));
+        g();
 
-        auto res = result();
-        input->connect(res);
-        g.eval();
-        CPPUNIT_ASSERT(res->snap() == 1);
-    }
-
-    void testSimpleGraph() {
-        calc::Graph<0> g;
-        auto in1 = g.input(1);
-        auto in2 = g.input(2);
-        auto node = g.node(std::plus<int>(), in1, in2);
-
-        auto res = result();
-        node->connect(res);
-        g.eval();
-        CPPUNIT_ASSERT(res->snap() == 3);
+        CPPUNIT_ASSERT(res.load() == 3);
     }
 
     CPPUNIT_TEST_SUITE(GraphTest);
-    CPPUNIT_TEST(testInput);
-    CPPUNIT_TEST(testSimpleGraph);
+    CPPUNIT_TEST(testSingleNode);
     CPPUNIT_TEST_SUITE_END();
 };
 
