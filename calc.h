@@ -21,6 +21,8 @@ namespace calc {
     class Node;
     template<typename RET>
     class Connectable;
+	template<typename RET>
+	class Constant;
 
     struct WorkQueueCmp {
         constexpr bool operator()(const Work* a, const Work* b);
@@ -41,6 +43,22 @@ namespace calc {
         WorkState(Graph& g) : g(g) {}
     };
 
+    template<typename RET>
+    class Connectable {
+    public:
+    	virtual void connect(Input<RET>) = 0;
+    };
+
+    template<typename RET>
+    inline Connectable<RET>* unconnected() {
+    	return static_cast<Connectable<RET>*>(nullptr);
+    }
+
+    template<typename RET>
+    inline void connect(Connectable<RET>* to, Input<RET> from) {
+    	if (to)
+    		to->connect(from);
+    }
 
     inline void intrusive_ptr_add_ref(Work*);
     inline void intrusive_ptr_release(Work*);
@@ -110,6 +128,15 @@ namespace calc {
 	    friend class Input;
 
         void add_to_queue(Work& w);
+
+        template <typename ...INPUTS, std::size_t ...I>
+        void connectall(
+        	std::index_sequence<I...>,
+        	std::tuple<Connectable<INPUTS>*...> tos,
+        	std::tuple<Input<INPUTS>...> froms) {
+        	int forceexpansion[] = { 0, ( connect(std::get<I>(tos), std::get<I>(froms)), 0) ... };
+        }
+
     protected:
         void eval(WorkState&) {
             std::abort();
@@ -142,11 +169,22 @@ namespace calc {
 
     	template<typename FN, typename RET, typename... INPUTS>
     	friend class Node;
+    	template<typename RET>
+    	friend class Constant;
     };
 
     template<typename RET>
-    class Connectable {
-    	virtual void connect(Input<RET>) = 0;
+    class Constant : public Connectable<RET> {
+    public:
+    	void connect(Input<RET> in) {
+    		in.in->store(value);
+    	}
+
+        Constant(RET value) noexcept : value(value) {}
+        Constant(Constant&& other) noexcept : value(std::move(other.value)) {}
+        Constant(const Constant& other) noexcept : value(other.value) {}
+    private:
+    	RET value;
     };
 
     template<typename FN, typename RET, typename... INPUTS>
@@ -155,6 +193,10 @@ namespace calc {
     	template<std::size_t N>
         auto input() -> Input<std::tuple_element_t<N, std::tuple<INPUTS...>>> {
         	return Input<std::tuple_element_t<N, std::tuple<INPUTS...>>>(std::get<N>(this->inputs));
+        }
+
+        std::tuple<Input<INPUTS>...> inputtuple() {
+        	return inputtuple_fn(std::index_sequence_for<INPUTS...>{});
         }
 
         void connect(Input<RET> a) override {
@@ -182,6 +224,7 @@ namespace calc {
             	dependent++) {
 
             	// pass on the new value & schedule the dowstream work
+            	// TODO: pluggable propagation
                 dependent->in->store(val);
             	if (dependent->ref) {
             		ws.add_to_queue(*dependent->ref);
@@ -194,13 +237,17 @@ namespace calc {
     private:
         FN fn;
         std::tuple<std::atomic<INPUTS>...> inputs;
-        Node(uint32_t id, FN fn) :
-            Work(id), fn(fn) {}
+
+        Node(uint32_t id, FN fn) : Work(id), fn(fn) {}
         friend class Graph;
 
         template<std::size_t ...I>
         RET call_fn(std::index_sequence<I...>) {
             return fn(std::get<I>(inputs).load()...);
+        }
+        template<std::size_t ...I>
+        auto inputtuple_fn(std::index_sequence<I...>) {
+            return std::make_tuple<Input<INPUTS>...>(this->input<I>()...);
         }
 
     /**
@@ -234,10 +281,20 @@ namespace calc {
     auto Graph::node(
         const FN fn,
         Connectable<INPUTS>*... args) {
+    	
+    	// first, make the node
     	using RET = typename std::result_of<FN(INPUTS...)>::type;
     	auto node = new Node<FN, RET, INPUTS...>(this->ids++, fn);
+
+    	// next, connect any given inputs
+    	connectall(
+    		std::index_sequence_for<INPUTS...>{},
+    		std::make_tuple<Connectable<INPUTS>*...>(std::move(args)...),
+    		node->inputtuple());
+
+    	// finally schedule it for evaluation
     	this->add_to_queue(*node);
-    	return node;
+    	return boost::intrusive_ptr<Node<FN, RET, INPUTS...>>(node);
     }
 }
 
