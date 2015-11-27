@@ -12,6 +12,8 @@
 
 #include <boost/intrusive_ptr.hpp>
 
+// TODO: shared pointers
+// TODO: load / store mem ordering
 namespace calc {
     class Graph;
     class Work;
@@ -31,7 +33,6 @@ namespace calc {
     class WorkState final {
     public:
         void add_to_queue(Work& work);
-        void operator()();
     private:
         std::priority_queue<
             Work*,
@@ -109,11 +110,17 @@ namespace calc {
         }
     }
 
+    struct Stats {
+    	uint16_t queued;
+    	uint16_t worked;
+    	uint16_t duplicates;
+    };
+
     class Graph final : public Work {
     public:
         Graph() : Work(0, this), ids(1) {}
 
-        void operator()();
+        void operator()(struct Stats* = nullptr);
         
         template<typename FN, typename... INPUTS>
         auto node(
@@ -147,7 +154,7 @@ namespace calc {
     class Input final {
     public:
 	    void append(Graph& graph, INPUT v) {
-	        this->in->store(v);
+	        in->store(v);
 	        if (ref) {
 	        	graph.add_to_queue(*ref);
 	        }
@@ -165,7 +172,7 @@ namespace calc {
 
         Input(
         	std::atomic<INPUT>& in,
-        	boost::intrusive_ptr<Work> ref) : in(in), ref(ref) {}
+        	boost::intrusive_ptr<Work> ref) : in(&in), ref(ref) {}
 
     	template<typename FN, typename RET, typename... INPUTS>
     	friend class Node;
@@ -192,7 +199,9 @@ namespace calc {
     public:
     	template<std::size_t N>
         auto input() -> Input<std::tuple_element_t<N, std::tuple<INPUTS...>>> {
-        	return Input<std::tuple_element_t<N, std::tuple<INPUTS...>>>(std::get<N>(this->inputs));
+        	return Input<std::tuple_element_t<N, std::tuple<INPUTS...>>>(
+        		std::get<N>(inputs),
+        		boost::intrusive_ptr<Work>(this));
         }
 
         std::tuple<Input<INPUTS>...> inputtuple() {
@@ -200,14 +209,14 @@ namespace calc {
         }
 
         void connect(Input<RET> a) override {
-            auto n = this->spinlock();
+            auto n = spinlock();
             dependents.push_front(a);
-            this->next.store(n); // ...and unlock
+            next.store(n); // ...and unlock
         }
 
     protected:
         void eval(WorkState& ws) override {
-            auto current = this->trylock();
+            auto current = trylock();
 
             if (current == this) {
                 // another calculation in progress
@@ -231,8 +240,7 @@ namespace calc {
             	}
             }
 
-            // release the calculation lock, if no-one's re-scheduled us
-            this->next.compare_exchange_strong(current, nullptr);
+            release();
         }
     private:
         FN fn;
@@ -247,7 +255,7 @@ namespace calc {
         }
         template<std::size_t ...I>
         auto inputtuple_fn(std::index_sequence<I...>) {
-            return std::make_tuple<Input<INPUTS>...>(this->input<I>()...);
+            return std::make_tuple<Input<INPUTS>...>(input<I>()...);
         }
 
     /**
@@ -262,11 +270,11 @@ namespace calc {
      */
     private:
         Work* trylock() {
-        	return this->next.exchange(this);
+        	return next.exchange(this);
         }
         Work* spinlock() {
             while (true) {
-                auto n = this->trylock();
+                auto n = trylock();
                 if (n != this) {
                 	return n;
                 }
@@ -274,6 +282,14 @@ namespace calc {
                 // it's already locked
                 std::this_thread::yield();
             }
+        }
+
+        /**
+         * release the calculation lock, if no-one's re-scheduled us
+         */
+        void release() {
+        	Work* t = this;
+        	next.compare_exchange_strong(t, nullptr);
         }
     };
 
@@ -284,7 +300,7 @@ namespace calc {
     	
     	// first, make the node
     	using RET = typename std::result_of<FN(INPUTS...)>::type;
-    	auto node = new Node<FN, RET, INPUTS...>(this->ids++, fn);
+    	auto node = boost::intrusive_ptr<Node<FN, RET, INPUTS...>>(new Node<FN, RET, INPUTS...>(ids++, fn));
 
     	// next, connect any given inputs
     	connectall(
@@ -293,8 +309,104 @@ namespace calc {
     		node->inputtuple());
 
     	// finally schedule it for evaluation
-    	this->add_to_queue(*node);
-    	return boost::intrusive_ptr<Node<FN, RET, INPUTS...>>(node);
+    	add_to_queue(*node);
+    	return node;
+    }
+    static const struct Stats EmptyStats {};
+
+    /** 
+     * TODO: fixed size work queue
+     */
+    void WorkState::add_to_queue(Work& work) {
+        if (work.id <= current_id)
+            // process it next Graph#eval
+            g.add_to_queue(work);
+        else {
+            // spin-lock it and add to our queue
+            intrusive_ptr_add_ref(&work);
+            q.push(&work);
+        }
+    }
+
+    constexpr bool WorkQueueCmp::operator()(const Work* a, const Work* b) {
+        return a->id > b->id;
+    }
+
+    /**
+     * Doesn't release the locks we have on the Work* items in the queue, as we'll
+     * just put them in a heap.
+     *
+     * TODO: fixed size work queue
+     */
+    void Graph::operator()(struct Stats* stats) {
+        if (stats)
+            *stats = EmptyStats;
+
+        auto head = this->next.exchange(this);
+        if (head == this)
+            return;
+
+        auto work = WorkState(*this);
+        for (auto w = head; w != this; w = w->next.load()) {
+            work.q.push(w);
+            if (stats)
+                stats->queued++;
+        }
+
+        while (!work.q.empty()) {
+
+            Work* w = work.q.top();
+            work.q.pop();
+
+            // remove any duplicates, we only need to
+            // calculate things once.
+            while (!work.q.empty() && work.q.top()->id == w->id) {
+                intrusive_ptr_release(work.q.top());
+                work.q.pop();
+                if (stats)
+                    stats->duplicates++;
+            }
+
+            work.current_id = w->id;
+            w->eval(work);
+            if (stats)
+                stats->worked++;
+
+            // finally finished with this Work - it's not on the Graph queue or the heap
+            intrusive_ptr_release(w);
+        }
+    }
+
+    void Graph::add_to_queue(Work& w) {
+        // don't want work to be deleted while queued
+        intrusive_ptr_add_ref(&w);
+
+        Work* snap;
+        while (true) {
+
+            // only queue us up if we're unlocked or locked, i.e.
+            // not if we're already on the work queue.
+            auto lock = w.next.load();
+            if (lock != nullptr && lock != &w) {
+                intrusive_ptr_release(&w);
+                return;
+            }
+
+            // add w to the queue by chaning its `next` pointer to point
+            // to the head of the queue
+            snap = this->next.load();
+            if (!w.next.compare_exchange_weak(lock, snap))
+                continue;
+
+            if (this->next.compare_exchange_weak(snap, &w))
+                // success! but keep the intrustive reference active
+                return;
+
+            // if we're here we pointed `w.next` to the head of the queue,
+            // but something changed the queue before we could update it
+            // to `w`. Undo (i.e. unlock) `w`:
+            w.next.store(lock);
+        }
     }
 }
 
