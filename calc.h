@@ -17,15 +17,15 @@
 namespace calc {
     class Graph;
     class Work;
-    template<typename INPUT>
+    template<typename>
     class Input;
-    template<typename FN, typename... INPUTS>
+    template<template<typename> class, typename, typename...>
     class Node;
-    template<typename RET>
+    template<typename>
     class Connectable;
-	template<typename RET>
+	template<typename>
 	class Constant;
-    template<template<typename> class PROPAGATE>
+    template<template<typename> class>
     class NodeBuilder;
 
     struct WorkQueueCmp {
@@ -147,9 +147,9 @@ namespace calc {
         std::atomic<uint32_t> ids;
 
         friend class WorkState;
-	    template<typename INPUT>
+	    template<typename>
 	    friend class Input;
-        template<template<typename> class PROPAGATE>
+        template<template<typename> class>
         friend class NodeBuilder;
 
         void add_to_queue(Work& w);
@@ -192,9 +192,9 @@ namespace calc {
         	std::atomic<INPUT>& in,
         	boost::intrusive_ptr<Work> ref) : in(&in), ref(ref) {}
 
-    	template<typename FN, typename... INPUTS>
+    	template<template<typename> class, typename, typename...>
     	friend class Node;
-    	template<typename RET>
+    	template<typename>
     	friend class Constant;
     };
 
@@ -212,7 +212,7 @@ namespace calc {
     	RET value;
     };
 
-    template<typename FN, typename... INPUTS>
+    template<template<typename> class PROPAGATE, typename FN, typename... INPUTS>
     class Node final : public Work, public Connectable<std::result_of_t<FN(INPUTS...)>> {
     public:
         using RET = typename std::result_of_t<FN(INPUTS...)>;
@@ -247,17 +247,19 @@ namespace calc {
             // calculate ourselves
             RET val = call_fn(std::index_sequence_for<INPUTS...>{});
 
-            for (
-            	auto dependent = dependents.begin();
-            	dependent != dependents.end();
-            	dependent++) {
+            if (propagate(val)) {
+                for (
+                	auto dependent = dependents.begin();
+                	dependent != dependents.end();
+                	dependent++) {
 
-            	// pass on the new value & schedule the dowstream work
-            	// TODO: pluggable propagation
-                dependent->in->store(val);
-            	if (dependent->ref) {
-            		ws.add_to_queue(*dependent->ref);
-            	}
+                	// pass on the new value & schedule the dowstream work
+                	// TODO: pluggable propagation
+                    dependent->in->store(val);
+                	if (dependent->ref) {
+                		ws.add_to_queue(*dependent->ref);
+                	}
+                }
             }
 
             release();
@@ -278,15 +280,22 @@ namespace calc {
             return std::make_tuple<Input<INPUTS>...>(input<I>()...);
         }
 
-        template<template<typename> class PROPAGATE>
+        template<template<typename> class>
         friend class NodeBuilder;
-    /**
-     * Downstream nodes
-     */
-    private:
-    	std::forward_list<Input<RET>> dependents;
 
     /**
+     * PROPAGATION
+     */
+    private:
+        // downstream nodes
+    	std::forward_list<Input<RET>> dependents;
+
+        // the policy on when to propagate new values to dependents
+        PROPAGATE<RET> propagate;
+
+    /**
+     * LOCKING
+     * 
      * Uses the 'next' pointer as a lock. Returns 'this' if already locked, or
      * the old value if the lock was successful.
      */
@@ -329,7 +338,8 @@ namespace calc {
             Connectable<INPUTS>*... args) {
 
                 // first, make the node
-                auto node = boost::intrusive_ptr<Node<FN, INPUTS...>>(new Node<FN, INPUTS...>(g.ids++, fn));
+                auto node = boost::intrusive_ptr<Node<PROPAGATE, FN, INPUTS...>>(
+                    new Node<PROPAGATE, FN, INPUTS...>(g.ids++, fn));
 
                 // next, connect any given inputs
                 g.connectall(
@@ -344,7 +354,10 @@ namespace calc {
     private:
         Graph& g;
         NodeBuilder(Graph& g) : g(g) {}
+
         friend class Graph;
+        template<template<typename> class>
+        friend class NodeBuilder;
     };
 
     NodeBuilder<Always> Graph::node() {

@@ -4,6 +4,7 @@
 
 class GraphTest final : public CppUnit::TestFixture  {
 public:
+    const std::function<int(int)> int_identity = [](int a) { return a; };
 
     void testSingleNode() {
         struct calc::Stats stats;
@@ -112,10 +113,10 @@ public:
         
         // setup
         auto in1 = g.node().connect(
-            [](int a) { return a; },
+            int_identity,
             calc::unconnected<int>());
         auto in2 = g.node().connect(
-            [](int a) { return a; },
+            int_identity,
             calc::unconnected<int>());
         auto out = g.node().connect(
             std::less<int>(),
@@ -161,10 +162,67 @@ public:
         CPPUNIT_ASSERT(stats.worked == 0);
     }
 
+
+    void testUpdatePolicy() {
+        struct calc::Stats stats;
+        calc::Graph g;
+        std::atomic<int> always_res, onchange_res;
+        
+        // setup
+        auto in = g.node().connect(
+            int_identity,
+            calc::unconnected<int>());
+        auto always = g.
+            node().
+            propagate<calc::Always>().
+            connect(
+                int_identity,
+                in.get());
+        auto afteralways = g.node().connect(int_identity, always.get());
+        afteralways->connect(calc::Input<int>(always_res));
+        auto onchange = g.
+            node().
+            propagate<calc::OnChange>().
+            connect(
+                int_identity,
+                in.get());
+        auto afteronchange = g.node().connect(int_identity, onchange.get());
+        afteronchange->connect(calc::Input<int>(onchange_res));
+        
+        in->input<0>().append(g, 1);
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 5);
+        CPPUNIT_ASSERT(stats.worked == 5);
+        CPPUNIT_ASSERT(always_res.load() == 1);
+        CPPUNIT_ASSERT(onchange_res.load() == 1);
+
+        // check an empty run
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 0);
+        CPPUNIT_ASSERT(stats.worked == 0);
+
+        // same input
+        in->input<0>().append(g, 1);
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 1);
+        CPPUNIT_ASSERT(stats.worked == 4);
+        CPPUNIT_ASSERT(always_res.load() == 1);
+        CPPUNIT_ASSERT(onchange_res.load() == 1);
+
+        // a new input
+        in->input<0>().append(g, 2);
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 1);
+        CPPUNIT_ASSERT(stats.worked == 5);
+        CPPUNIT_ASSERT(always_res.load() == 2);
+        CPPUNIT_ASSERT(onchange_res.load() == 2);
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testSingleNode);
     CPPUNIT_TEST(testConstant);
     CPPUNIT_TEST(testChain);
+    CPPUNIT_TEST(testUpdatePolicy);
     CPPUNIT_TEST_SUITE_END();
 };
 
