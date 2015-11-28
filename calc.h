@@ -115,6 +115,7 @@ namespace calc {
     	uint16_t worked;
     	uint16_t duplicates;
     };
+    static const struct Stats EmptyStats {};
 
     class Graph final : public Work {
     public:
@@ -194,9 +195,26 @@ namespace calc {
     	RET value;
     };
 
+    template<typename RET>
+    struct PropagateAlways {
+    	bool operator()(RET) {
+    		return true;
+    	}
+    };
+
+    template<typename RET>
+    struct PropagateChanged {
+    	bool operator()(RET latest) {
+    		return last.exchange(latest) == latest;
+    	}
+    private:
+    	std::atomic<RET> last;
+    };
+
     template<typename FN, typename RET, typename... INPUTS>
-    class Node final : public Work, public Connectable<RET> {
+    class Node final : public Work, public Connectable<std::result_of_t<FN(INPUTS...)>> {
     public:
+
     	template<std::size_t N>
         auto input() -> Input<std::tuple_element_t<N, std::tuple<INPUTS...>>> {
         	return Input<std::tuple_element_t<N, std::tuple<INPUTS...>>>(
@@ -299,7 +317,7 @@ namespace calc {
         Connectable<INPUTS>*... args) {
     	
     	// first, make the node
-    	using RET = typename std::result_of<FN(INPUTS...)>::type;
+    	using RET = typename std::result_of_t<FN(INPUTS...)>;
     	auto node = boost::intrusive_ptr<Node<FN, RET, INPUTS...>>(new Node<FN, RET, INPUTS...>(ids++, fn));
 
     	// next, connect any given inputs
@@ -312,7 +330,6 @@ namespace calc {
     	add_to_queue(*node);
     	return node;
     }
-    static const struct Stats EmptyStats {};
 
     /** 
      * TODO: fixed size work queue
@@ -381,7 +398,6 @@ namespace calc {
         // don't want work to be deleted while queued
         intrusive_ptr_add_ref(&w);
 
-        Work* snap;
         while (true) {
 
             // only queue us up if we're unlocked or locked, i.e.
@@ -394,7 +410,7 @@ namespace calc {
 
             // add w to the queue by chaning its `next` pointer to point
             // to the head of the queue
-            snap = this->next.load();
+            Work* snap = this->next.load();
             if (!w.next.compare_exchange_weak(lock, snap))
                 continue;
 
