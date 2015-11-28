@@ -19,7 +19,7 @@ namespace calc {
     class Work;
     template<typename INPUT>
     class Input;
-    template<typename FN, typename RET, typename... INPUTS>
+    template<typename FN, typename... INPUTS>
     class Node;
     template<typename RET>
     class Connectable;
@@ -175,7 +175,7 @@ namespace calc {
         	std::atomic<INPUT>& in,
         	boost::intrusive_ptr<Work> ref) : in(&in), ref(ref) {}
 
-    	template<typename FN, typename RET, typename... INPUTS>
+    	template<typename FN, typename... INPUTS>
     	friend class Node;
     	template<typename RET>
     	friend class Constant;
@@ -211,9 +211,10 @@ namespace calc {
     	std::atomic<RET> last;
     };
 
-    template<typename FN, typename RET, typename... INPUTS>
+    template<typename FN, typename... INPUTS>
     class Node final : public Work, public Connectable<std::result_of_t<FN(INPUTS...)>> {
     public:
+        using RET = typename std::result_of_t<FN(INPUTS...)>;
 
     	template<std::size_t N>
         auto input() -> Input<std::tuple_element_t<N, std::tuple<INPUTS...>>> {
@@ -317,8 +318,7 @@ namespace calc {
         Connectable<INPUTS>*... args) {
     	
     	// first, make the node
-    	using RET = typename std::result_of_t<FN(INPUTS...)>;
-    	auto node = boost::intrusive_ptr<Node<FN, RET, INPUTS...>>(new Node<FN, RET, INPUTS...>(ids++, fn));
+    	auto node = boost::intrusive_ptr<Node<FN, INPUTS...>>(new Node<FN, INPUTS...>(ids++, fn));
 
     	// next, connect any given inputs
     	connectall(
