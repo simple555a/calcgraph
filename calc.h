@@ -25,9 +25,27 @@ namespace calc {
     class Connectable;
 	template<typename RET>
 	class Constant;
+    template<template<typename> class PROPAGATE>
+    class NodeBuilder;
 
     struct WorkQueueCmp {
         constexpr bool operator()(const Work* a, const Work* b);
+    };
+
+    template<typename RET>
+    struct Always {
+        bool operator()(RET) {
+            return true;
+        }
+    };
+
+    template<typename RET>
+    struct OnChange {
+        bool operator()(RET latest) {
+            return last.exchange(latest) != latest;
+        }
+    private:
+        std::atomic<RET> last;
     };
 
     class WorkState final {
@@ -123,10 +141,7 @@ namespace calc {
 
         void operator()(struct Stats* = nullptr);
         
-        template<typename FN, typename... INPUTS>
-        auto node(
-            const FN fn,
-            Connectable<INPUTS>*... args);
+        NodeBuilder<Always> node();
 
     private:
         std::atomic<uint32_t> ids;
@@ -134,6 +149,8 @@ namespace calc {
         friend class WorkState;
 	    template<typename INPUT>
 	    friend class Input;
+        template<template<typename> class PROPAGATE>
+        friend class NodeBuilder;
 
         void add_to_queue(Work& w);
 
@@ -195,22 +212,6 @@ namespace calc {
     	RET value;
     };
 
-    template<typename RET>
-    struct PropagateAlways {
-    	bool operator()(RET) {
-    		return true;
-    	}
-    };
-
-    template<typename RET>
-    struct PropagateChanged {
-    	bool operator()(RET latest) {
-    		return last.exchange(latest) == latest;
-    	}
-    private:
-    	std::atomic<RET> last;
-    };
-
     template<typename FN, typename... INPUTS>
     class Node final : public Work, public Connectable<std::result_of_t<FN(INPUTS...)>> {
     public:
@@ -262,10 +263,10 @@ namespace calc {
             release();
         }
     private:
-        FN fn;
+        const FN fn;
         std::tuple<std::atomic<INPUTS>...> inputs;
 
-        Node(uint32_t id, FN fn) : Work(id), fn(fn) {}
+        Node(uint32_t id, const FN fn) : Work(id), fn(fn) {}
         friend class Graph;
 
         template<std::size_t ...I>
@@ -277,6 +278,8 @@ namespace calc {
             return std::make_tuple<Input<INPUTS>...>(input<I>()...);
         }
 
+        template<template<typename> class PROPAGATE>
+        friend class NodeBuilder;
     /**
      * Downstream nodes
      */
@@ -312,23 +315,40 @@ namespace calc {
         }
     };
 
-    template<typename FN, typename... INPUTS>
-    auto Graph::node(
-        const FN fn,
-        Connectable<INPUTS>*... args) {
-    	
-    	// first, make the node
-    	auto node = boost::intrusive_ptr<Node<FN, INPUTS...>>(new Node<FN, INPUTS...>(ids++, fn));
+    template<template<typename> class PROPAGATE>
+    class NodeBuilder final {
+    public:
+        template<template<typename> class NEWPROPAGATE>
+        NodeBuilder<NEWPROPAGATE> propagate() {
+            return NodeBuilder<NEWPROPAGATE>(g);
+        }
 
-    	// next, connect any given inputs
-    	connectall(
-    		std::index_sequence_for<INPUTS...>{},
-    		std::make_tuple<Connectable<INPUTS>*...>(std::move(args)...),
-    		node->inputtuple());
+        template<typename FN, typename... INPUTS>
+        auto connect(
+            const FN fn,
+            Connectable<INPUTS>*... args) {
 
-    	// finally schedule it for evaluation
-    	add_to_queue(*node);
-    	return node;
+                // first, make the node
+                auto node = boost::intrusive_ptr<Node<FN, INPUTS...>>(new Node<FN, INPUTS...>(g.ids++, fn));
+
+                // next, connect any given inputs
+                g.connectall(
+                    std::index_sequence_for<INPUTS...>{},
+                    std::make_tuple<Connectable<INPUTS>*...>(std::move(args)...),
+                    node->inputtuple());
+
+                // finally schedule it for evaluation
+                g.add_to_queue(*node);
+                return node;
+        }
+    private:
+        Graph& g;
+        NodeBuilder(Graph& g) : g(g) {}
+        friend class Graph;
+    };
+
+    NodeBuilder<Always> Graph::node() {
+        return NodeBuilder<Always>(*this);
     }
 
     /** 

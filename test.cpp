@@ -11,7 +11,7 @@ public:
         std::atomic<int> res(0);
         
         // setup
-        auto node = g.node(
+        auto node = g.node().connect(
             std::plus<int>(),
             calc::unconnected<int>(),
             calc::unconnected<int>());
@@ -43,7 +43,7 @@ public:
         std::atomic<int> res;
 
         calc::Constant<int> one(1), two(2);
-        auto node = g.node(
+        auto node = g.node().connect(
             std::plus<int>(),
             &one,
             &two);
@@ -66,7 +66,7 @@ public:
         std::atomic<int> res(0);
         
         // setup: connect output to second input
-        auto node = g.node(
+        auto node = g.node().connect(
             std::plus<int>(),
             calc::unconnected<int>(),
             calc::unconnected<int>());
@@ -111,13 +111,13 @@ public:
         std::atomic<bool> res;
         
         // setup
-        auto in1 = g.node(
+        auto in1 = g.node().connect(
             [](int a) { return a; },
             calc::unconnected<int>());
-        auto in2 = g.node(
+        auto in2 = g.node().connect(
             [](int a) { return a; },
             calc::unconnected<int>());
-        auto out = g.node(
+        auto out = g.node().connect(
             std::less<int>(),
             in1.get(),
             in2.get());
