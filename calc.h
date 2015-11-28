@@ -14,6 +14,8 @@
 
 // TODO: shared pointers
 // TODO: load / store mem ordering
+// TODO: fixed size work queue
+// TODO: graph loop on change
 namespace calc {
     class Graph;
     class Work;
@@ -172,7 +174,7 @@ namespace calc {
     class Input final {
     public:
 	    void append(Graph& graph, INPUT v) {
-	        in->store(v);
+	        in->store(v, std::memory_order_release);
 	        if (ref) {
 	        	graph.add_to_queue(*ref);
 	        }
@@ -231,7 +233,7 @@ namespace calc {
         void connect(Input<RET> a) override {
             auto n = spinlock();
             dependents.push_front(a);
-            next.store(n); // ...and unlock
+            next.store(n, std::memory_order_release); // ...and unlock
         }
 
     protected:
@@ -254,7 +256,6 @@ namespace calc {
                 	dependent++) {
 
                 	// pass on the new value & schedule the dowstream work
-                	// TODO: pluggable propagation
                     dependent->in->store(val);
                 	if (dependent->ref) {
                 		ws.add_to_queue(*dependent->ref);
@@ -365,7 +366,7 @@ namespace calc {
     }
 
     /** 
-     * TODO: fixed size work queue
+     * 
      */
     void WorkState::add_to_queue(Work& work) {
         if (work.id <= current_id)
@@ -385,8 +386,6 @@ namespace calc {
     /**
      * Doesn't release the locks we have on the Work* items in the queue, as we'll
      * just put them in a heap.
-     *
-     * TODO: fixed size work queue
      */
     void Graph::operator()(struct Stats* stats) {
         if (stats)
@@ -397,7 +396,7 @@ namespace calc {
             return;
 
         auto work = WorkState(*this);
-        for (auto w = head; w != this; w = w->next.load()) {
+        for (auto w = head; w != this; w = w->next.load(std::memory_order_acquire)) {
             work.q.push(w);
             if (stats)
                 stats->queued++;
@@ -435,7 +434,7 @@ namespace calc {
 
             // only queue us up if we're unlocked or locked, i.e.
             // not if we're already on the work queue.
-            auto lock = w.next.load();
+            auto lock = w.next.load(std::memory_order_acquire);
             if (lock != nullptr && lock != &w) {
                 intrusive_ptr_release(&w);
                 return;
@@ -443,7 +442,7 @@ namespace calc {
 
             // add w to the queue by chaning its `next` pointer to point
             // to the head of the queue
-            Work* snap = this->next.load();
+            Work* snap = this->next.load(std::memory_order_acquire);
             if (!w.next.compare_exchange_weak(lock, snap))
                 continue;
 
@@ -454,7 +453,7 @@ namespace calc {
             // if we're here we pointed `w.next` to the head of the queue,
             // but something changed the queue before we could update it
             // to `w`. Undo (i.e. unlock) `w`:
-            w.next.store(lock);
+            w.next.store(lock, std::memory_order_release);
         }
     }
 }

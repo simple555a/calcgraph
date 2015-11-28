@@ -205,7 +205,7 @@ public:
         in->input<0>().append(g, 1);
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 4);
+        CPPUNIT_ASSERT(stats.worked == 4); // *not* 5
         CPPUNIT_ASSERT(always_res.load() == 1);
         CPPUNIT_ASSERT(onchange_res.load() == 1);
 
