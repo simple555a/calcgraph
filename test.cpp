@@ -21,20 +21,20 @@ public:
         node->connect(calc::Input<int>(res));
         
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 3);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
 
         // update an input
         node->input<0>().append(g, 3);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 5);
     }
 
@@ -51,14 +51,14 @@ public:
         node->connect(calc::Input<int>(res));
         
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 3);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
     }
 
     void testCircular() {
@@ -76,33 +76,33 @@ public:
         node->connect(calc::Input<int>(res));
         
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 1);
 
         // should recycle input
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 2);
 
         // should recycle input again
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 3);
 
         // try updating the seed
         node->input<0>().append(g, 5);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 8);
 
         // should recycle re-seeded input
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 9);
     }
 
@@ -127,39 +127,39 @@ public:
         in1->input<0>().append(g, 1);
         in2->input<0>().append(g, 2);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 3);
-        CPPUNIT_ASSERT(stats.worked == 3);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 3);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 3);
         CPPUNIT_ASSERT(res.read() == true);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
 
         // update an input & check only one runs
         in1->input<0>().append(g, 3);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 2);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 2);
         CPPUNIT_ASSERT(res.read() == false);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
 
         // update both inputs
         in1->input<0>().append(g, 5);
         in2->input<0>().append(g, 6);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 2);
-        CPPUNIT_ASSERT(stats.worked == 3);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 2);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 3);
         CPPUNIT_ASSERT(res.read() == true);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
     }
 
 
@@ -191,29 +191,29 @@ public:
         
         in->input<0>().append(g, 1);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 5);
-        CPPUNIT_ASSERT(stats.worked == 5);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 5);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 5);
         CPPUNIT_ASSERT(always_res.read() == 1);
         CPPUNIT_ASSERT(onchange_res.read() == 1);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
 
         // same input
         in->input<0>().append(g, 1);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 4); // *not* 5
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 4); // *not* 5
         CPPUNIT_ASSERT(always_res.read() == 1);
         CPPUNIT_ASSERT(onchange_res.read() == 1);
 
         // a new input
         in->input<0>().append(g, 2);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 5);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 5);
         CPPUNIT_ASSERT(always_res.read() == 2);
         CPPUNIT_ASSERT(onchange_res.read() == 2);
     }
@@ -241,19 +241,19 @@ public:
         
         adder->input<1>().append(g, 1);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 2);
-        CPPUNIT_ASSERT(stats.worked == 2);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 2);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 2);
         CPPUNIT_ASSERT(res.read() == 1);
 
         // check an empty run
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 0);
-        CPPUNIT_ASSERT(stats.worked == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
 
         adder->input<1>().append(g, 5);
         g(&stats);
-        CPPUNIT_ASSERT(stats.queued == 1);
-        CPPUNIT_ASSERT(stats.worked == 2);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 2);
         CPPUNIT_ASSERT(res.read() == 2);
 
     }

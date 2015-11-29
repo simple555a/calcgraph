@@ -9,6 +9,8 @@
 #include <queue>
 #include <thread>
 #include <tuple>
+#include <sstream>
+#include <string>
 
 #include <boost/intrusive_ptr.hpp>
 
@@ -36,13 +38,13 @@ namespace calc {
     template<typename VAL>
     class Value final {
     public:
-        void store(VAL v) {
+        inline void store(VAL v) {
             val.store(v, std::memory_order_release);
         }
-        VAL read() {
+        inline VAL read() {
             return val.load(std::memory_order_acquire);
         }
-        VAL exchange(VAL other) {
+        inline VAL exchange(VAL other) {
             return val.exchange(other, std::memory_order_acq_rel);
         }
 
@@ -56,13 +58,13 @@ namespace calc {
     template<typename VAL>
     class Value<std::shared_ptr<VAL>> final {
     public:
-        void store(std::shared_ptr<VAL> v) {
+        inline void store(std::shared_ptr<VAL> v) {
             std::atomic_store_explicit(&val, v, std::memory_order_release);
         }
-        std::shared_ptr<VAL> read() {
+        inline std::shared_ptr<VAL> read() {
             return std::atomic_load_explicit(&val, std::memory_order_acquire);
         }
-        std::shared_ptr<VAL> exchange(std::shared_ptr<VAL> other) {
+        inline std::shared_ptr<VAL> exchange(std::shared_ptr<VAL> other) {
             return std::atomic_exchange_explicit(&val, other, std::memory_order_acq_rel);
         }
 
@@ -75,14 +77,14 @@ namespace calc {
 
     template<typename RET>
     struct Always {
-        bool operator()(RET) {
+        inline constexpr bool operator()(RET) {
             return true;
         }
     };
 
     template<typename RET>
     struct OnChange {
-        bool operator()(RET latest) {
+        inline bool operator()(RET latest) {
             return last.exchange(latest) != latest;
         }
     private:
@@ -98,9 +100,10 @@ namespace calc {
             std::vector<Work*>,
             WorkQueueCmp> q;
         Graph& g;
+        struct Stats* stats;
         friend class Graph;
         uint32_t current_id;
-        WorkState(Graph& g) : g(g) {}
+        WorkState(Graph& g, struct Stats* stats) : g(g), stats(stats) {}
     };
 
     template<typename RET>
@@ -123,6 +126,10 @@ namespace calc {
     inline void intrusive_ptr_add_ref(Work*);
     inline void intrusive_ptr_release(Work*);
 
+    namespace flags {
+        static const std::uintptr_t LOCK = 1;
+    }
+
     /**
      * A building block of the graph; either a raw input or code to be evaluated. This class handles the work queue.
      */
@@ -132,30 +139,73 @@ namespace calc {
         const uint32_t id;
 
         virtual ~Work() {}
-    protected:
 
-        virtual void eval(WorkState&) = 0;
-
-        /*
-         * an intrinsic work queue for graph evaluation.
+        /**
+         * Returns when this `Work` is added to the `work_queue` of the given `Graph`. Could return instantly if already scheduled.
          */
-        std::atomic<Work*> next;
+        void schedule(Graph& g);
 
-        Work(uint32_t id, Work* next = nullptr) : 
+        /**
+         * Actually do the work.
+         */
+        virtual void eval(WorkState&) = 0;
+    protected:
+        Work(uint32_t id) : 
             id(id), 
-            next(next),
-            refcount(0) {}
+            refcount(0),
+            next(0) {}
         Work(const Work&) = delete;
         Work& operator=(const Work&) = delete;
-        friend class Graph;
         friend class WorkState;
 
     private:
         // for boost's intrinsic_ptr
         std::atomic_uint_fast16_t refcount;
-
         friend void intrusive_ptr_add_ref(Work*);
         friend void intrusive_ptr_release(Work*);
+
+    /**
+     * LOCKING
+     * 
+     * We'll use the `next` pointer to store two orthogonal pieces of information. The LSB will store the "locked" - or exclusive lock - flag, and the remaining bits will store the next link in the (intrusive) `Graph.work_queue`, or nullptr if this node isn't scheduled. Note that the locked flag refers to the Work that contains the `next` pointer, not the Work pointed to.
+     */
+    private:
+        /*
+         * an intrinsic work queue for graph evaluation, headed by `Graph.work_queue`.
+         */
+        std::atomic<std::uintptr_t> next;
+
+    public:
+        /**
+         * Extracts the pointer to the next node on the `work_queue`, or nullptr if it's not there.
+         */
+        Work* readnext() {
+            std::uintptr_t p = next.load(std::memory_order_acquire);
+            return reinterpret_cast<Work*>(p & ~flags::LOCK);
+        }
+
+    protected:
+        /**
+         * Not re-entrant; tries to acquire the lock and returns true if the lock was already taken.
+         */
+        bool trylock() {
+            return next.fetch_or(flags::LOCK, std::memory_order_acquire) & flags::LOCK;
+        }
+
+        /**
+         * release the calculation lock by setting the LSB to zero. Only call if you already hold the lick
+         */
+        void release() {
+            next.fetch_and(~flags::LOCK, std::memory_order_release);
+        }
+
+        /**
+         * As trylock, but will also reset the queue pointer to nullptr, taking us off the queue
+         */
+         bool trylock_and_dequeue() {
+            std::uintptr_t p = next.load(std::memory_order_acquire);
+            return !(p & flags::LOCK) && next.compare_exchange_strong(p, flags::LOCK, std::memory_order_acq_rel);
+         }
     };
 
 
@@ -176,12 +226,24 @@ namespace calc {
     	uint16_t queued;
     	uint16_t worked;
     	uint16_t duplicates;
+        uint16_t pushed_graph;
+        uint16_t pushed_heap;
+
+        operator std::string() const {
+            std::ostringstream out;  
+            out << "queued: " << queued;
+            out << ", worked: " << worked;
+            out << ", duplicates: " << duplicates;
+            out << ", pushed_graph: " << pushed_graph;
+            out << ", pushed_heap: " << pushed_heap;
+            return out.str();
+        }
     };
     static const struct Stats EmptyStats {};
 
-    class Graph final : public Work {
+    class Graph final {
     public:
-        Graph() : Work(0, this), ids(1) {}
+        Graph() : ids(1), tombstone(), work_queue(&tombstone) {}
 
         void operator()(struct Stats* = nullptr);
         
@@ -190,13 +252,25 @@ namespace calc {
     private:
         std::atomic<uint32_t> ids;
 
+        std::atomic<Work*> work_queue;
+
+        class Tombstone : public Work {
+        public:
+            void eval(WorkState&) {
+                std::abort();
+            }
+        private:
+            Tombstone() : Work(0) {}
+            friend class Graph;
+        };
+        Tombstone tombstone;
+
         friend class WorkState;
 	    template<typename>
 	    friend class Input;
         template<template<typename> class>
         friend class NodeBuilder;
-
-        void add_to_queue(Work& w);
+        friend class Work;
 
         template <typename ...INPUTS, std::size_t ...I>
         void connectall(
@@ -204,11 +278,6 @@ namespace calc {
         	std::tuple<Connectable<INPUTS>*...> tos,
         	std::tuple<Input<INPUTS>...> froms) {
         	int forceexpansion[] = { 0, ( connect(std::get<I>(tos), std::get<I>(froms)), 0) ... };
-        }
-
-    protected:
-        void eval(WorkState&) {
-            std::abort();
         }
     };
 
@@ -218,7 +287,7 @@ namespace calc {
 	    void append(Graph& graph, INPUT v) {
 	        in->store(v);
 	        if (ref) {
-	        	graph.add_to_queue(*ref);
+	        	ref->schedule(graph);
 	        }
 	    }
 
@@ -273,22 +342,29 @@ namespace calc {
         }
 
         void connect(Input<RET> a) override {
-            auto n = spinlock();
+            // spinlock until we can add this
+            while (!trylock()) {
+                std::this_thread::yield();
+            }
             dependents.push_front(a);
-            next.store(n, std::memory_order_release); // ...and unlock
+            release();
         }
 
-    protected:
         void eval(WorkState& ws) override {
-            auto current = trylock();
-
-            if (current == this) {
+            if (!trylock_and_dequeue()) {
                 // another calculation in progress, so put us on the work queue
                 // (which will change the `next` pointer to the next node in the
                 // work queue, not `this`)
                 ws.add_to_queue(*this);
                 return;
             }
+
+            // there's a race condition here: this Node can be put on the work queue, so
+            // if the inputs change we'll get rescheduled and re-ran. We only snap the atomic
+            // values in the next statement, so we could pick up newer values than the ones that
+            // triggered the recalculation of this Node, so the subsequent re-run would be
+            // unnecessary. See the OnChange propagation policy to mitagate this (your function
+            // should be idempotent!).
 
             // calculate ourselves
             RET val = call_fn(std::index_sequence_for<INPUTS...>{});
@@ -332,42 +408,11 @@ namespace calc {
      * PROPAGATION
      */
     private:
-        // downstream nodes
+        // downstream nodes, not threadsafe so controlled by the `Work.next` LSB lock
     	std::forward_list<Input<RET>> dependents;
 
         // the policy on when to propagate new values to dependents
         PROPAGATE<RET> propagate;
-
-    /**
-     * LOCKING
-     * 
-     * Uses the 'next' pointer as a lock. Returns 'this' if already locked, or
-     * the old value if the lock was successful.
-     */
-    private:
-        Work* trylock() {
-        	return next.exchange(this);
-        }
-        Work* spinlock() {
-            while (true) {
-                auto n = trylock();
-                if (n != this) {
-                	return n;
-                }
-
-                // it's already locked
-                std::this_thread::yield();
-            }
-        }
-
-        /**
-         * release the calculation lock, if no-one's re-scheduled us. If we're on
-         * the graph's work queue, then `next` won't be null or `this`.
-         */
-        void release() {
-        	Work* t = this;
-        	next.compare_exchange_strong(t, nullptr);
-        }
     };
 
     template<template<typename> class PROPAGATE>
@@ -394,7 +439,7 @@ namespace calc {
                     node->inputtuple());
 
                 // finally schedule it for evaluation
-                g.add_to_queue(*node);
+                node->schedule(g);
                 return node;
         }
     private:
@@ -414,13 +459,25 @@ namespace calc {
      * 
      */
     void WorkState::add_to_queue(Work& work) {
-        if (work.id <= current_id)
-            // process it next Graph#eval
-            g.add_to_queue(work);
-        else {
-            // spin-lock it and add to our queue
+        // note that the or-equals part of the check is important; if we failed
+        // to calculate `work` this time then `work.id` == `current_id`, and we want
+        // to put the work back on the graph queue for later evaluation.
+        if (work.id <= current_id) {
+            // process it next `Graph()`
+            work.schedule(g);
+
+            if (stats)
+                stats->pushed_graph++;
+        } else {
+            // keep anything around that's going on the heap - we remove a reference
+            // after popping them off the heap and `eval()`'ing them
             intrusive_ptr_add_ref(&work);
+
+            // FIXME
             q.push(&work);
+
+            if (stats)
+                stats->pushed_heap++;
         }
     }
 
@@ -436,12 +493,12 @@ namespace calc {
         if (stats)
             *stats = EmptyStats;
 
-        auto head = this->next.exchange(this);
-        if (head == this)
+        auto head = work_queue.exchange(&tombstone);
+        if (head == &tombstone)
             return;
 
-        auto work = WorkState(*this);
-        for (auto w = head; w != this; w = w->next.load(std::memory_order_acquire)) {
+        auto work = WorkState(*this, stats);
+        for (auto w = head; w != &tombstone; w = w->readnext()) {
             work.q.push(w);
             if (stats)
                 stats->queued++;
@@ -471,36 +528,43 @@ namespace calc {
         }
     }
 
-    void Graph::add_to_queue(Work& w) {
-        // don't want work to be deleted while queued
-        intrusive_ptr_add_ref(&w);
+    void Work::schedule(Graph& g) {
 
-        while (true) {
+            // don't want work to be deleted while queued
+            intrusive_ptr_add_ref(this);
 
-            // only queue us up if we're unlocked or locked, i.e.
-            // not if we're already on the work queue.
-            auto lock = w.next.load(std::memory_order_acquire);
-            if (lock != nullptr && lock != &w) {
-                intrusive_ptr_release(&w);
-                return;
+            bool first_time = true;
+            while (true) {
+                std::uintptr_t current = next.load(std::memory_order_acquire);
+                bool locked = current & flags::LOCK;
+
+                if (first_time && (current & ~flags::LOCK)) {
+                    // we're already on the work queue, as we're pointing to a non-zero
+                    // pointer
+                    intrusive_ptr_release(this);
+                    return;
+                }
+
+                // add w to the queue by chaning its `next` pointer to point
+                // to the head of the queue
+                Work* head = g.work_queue.load(std::memory_order_acquire);
+                if (!next.compare_exchange_weak(current, reinterpret_cast<std::uintptr_t>(head) | locked)) {
+                    // next was updated under us, retry from the start
+                    continue;
+                }
+
+                if (g.work_queue.compare_exchange_weak(head, this)) {
+                    // success! but keep the intrustive reference active
+                    return;
+                }
+
+                // if we're here we pointed `w.next` to the head of the queue,
+                // but something changed the queue before we could finish. The
+                // next time round the loop we know `current` will not be nullptr,
+                // so set a flag to skip the are-we-already-queued check.
+                first_time = false;
             }
-
-            // add w to the queue by chaning its `next` pointer to point
-            // to the head of the queue
-            Work* snap = this->next.load(std::memory_order_acquire);
-            if (!w.next.compare_exchange_weak(lock, snap))
-                continue;
-
-            if (this->next.compare_exchange_weak(snap, &w))
-                // success! but keep the intrustive reference active
-                return;
-
-            // if we're here we pointed `w.next` to the head of the queue,
-            // but something changed the queue before we could update it
-            // to `w`. Undo (i.e. unlock) `w`:
-            w.next.store(lock, std::memory_order_release);
         }
-    }
 }
 
 #endif
