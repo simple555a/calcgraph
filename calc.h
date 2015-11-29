@@ -241,7 +241,9 @@ namespace calc {
             auto current = trylock();
 
             if (current == this) {
-                // another calculation in progress
+                // another calculation in progress, so put us on the work queue
+                // (which will change the `next` pointer to the next node in the
+                // work queue, not `this`)
                 ws.add_to_queue(*this);
                 return;
             }
@@ -317,7 +319,8 @@ namespace calc {
         }
 
         /**
-         * release the calculation lock, if no-one's re-scheduled us
+         * release the calculation lock, if no-one's re-scheduled us. If we're on
+         * the graph's work queue, then `next` won't be null or `this`.
          */
         void release() {
         	Work* t = this;
