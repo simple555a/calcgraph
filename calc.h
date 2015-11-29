@@ -12,10 +12,9 @@
 
 #include <boost/intrusive_ptr.hpp>
 
-// TODO: shared pointers
-// TODO: load / store mem ordering
 // TODO: fixed size work queue
 // TODO: graph loop on change
+// TODO: fix locking
 namespace calc {
     class Graph;
     class Work;
@@ -34,6 +33,46 @@ namespace calc {
         constexpr bool operator()(const Work* a, const Work* b);
     };
 
+    template<typename VAL>
+    class Value final {
+    public:
+        void store(VAL v) {
+            val.store(v, std::memory_order_release);
+        }
+        VAL read() {
+            return val.load(std::memory_order_acquire);
+        }
+        VAL exchange(VAL other) {
+            return val.exchange(other, std::memory_order_acq_rel);
+        }
+
+        Value() noexcept : val() {}
+        Value(const Value& other) noexcept : val(other.val) {}
+        Value(Value&& other) noexcept : val(std::move(other.val)) {}
+    private:
+        std::atomic<VAL> val;
+    };
+
+    template<typename VAL>
+    class Value<std::shared_ptr<VAL>> final {
+    public:
+        void store(std::shared_ptr<VAL> v) {
+            std::atomic_store_explicit(&val, v, std::memory_order_release);
+        }
+        std::shared_ptr<VAL> read() {
+            return std::atomic_load_explicit(&val, std::memory_order_acquire);
+        }
+        std::shared_ptr<VAL> exchange(std::shared_ptr<VAL> other) {
+            return std::atomic_exchange_explicit(&val, other, std::memory_order_acq_rel);
+        }
+
+        Value() noexcept : val() {}
+        Value(const Value& other) noexcept : val(other.val) {}
+        Value(Value&& other) noexcept : val(std::move(other.val)) {}
+    private:
+        std::shared_ptr<VAL> val;
+    };
+
     template<typename RET>
     struct Always {
         bool operator()(RET) {
@@ -47,7 +86,7 @@ namespace calc {
             return last.exchange(latest) != latest;
         }
     private:
-        std::atomic<RET> last;
+        Value<RET> last;
     };
 
     class WorkState final {
@@ -130,6 +169,9 @@ namespace calc {
         }
     }
 
+    /**
+     * Statistics for a single evaluation of the calculation graph.
+     */
     struct Stats {
     	uint16_t queued;
     	uint16_t worked;
@@ -174,24 +216,24 @@ namespace calc {
     class Input final {
     public:
 	    void append(Graph& graph, INPUT v) {
-	        in->store(v, std::memory_order_release);
+	        in->store(v);
 	        if (ref) {
 	        	graph.add_to_queue(*ref);
 	        }
 	    }
 
-        Input(std::atomic<INPUT>& in) noexcept : in(&in) {}
+        Input(Value<INPUT>& in) noexcept : in(&in) {}
         Input(const Input& other) noexcept : in(other.in), ref(other.ref) {}
         Input(Input&& other) noexcept : in(std::move(other.in)), ref(std::move(other.ref)) {}
 
     private:
-        std::atomic<INPUT>* in;
+        Value<INPUT>* in;
 		
 		// so the target doesn't get GC'ed
 		boost::intrusive_ptr<Work> ref;
 
         Input(
-        	std::atomic<INPUT>& in,
+        	Value<INPUT>& in,
         	boost::intrusive_ptr<Work> ref) : in(&in), ref(ref) {}
 
     	template<template<typename> class, typename, typename...>
@@ -269,14 +311,14 @@ namespace calc {
         }
     private:
         const FN fn;
-        std::tuple<std::atomic<INPUTS>...> inputs;
+        std::tuple<Value<INPUTS>...> inputs;
 
         Node(uint32_t id, const FN fn) : Work(id), fn(fn) {}
         friend class Graph;
 
         template<std::size_t ...I>
         RET call_fn(std::index_sequence<I...>) {
-            return fn(std::get<I>(inputs).load()...);
+            return fn(std::get<I>(inputs).read()...);
         }
         template<std::size_t ...I>
         auto inputtuple_fn(std::index_sequence<I...>) {

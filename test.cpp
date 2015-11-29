@@ -9,7 +9,7 @@ public:
     void testSingleNode() {
         struct calc::Stats stats;
         calc::Graph g;
-        std::atomic<int> res(0);
+        calc::Value<int> res;
         
         // setup
         auto node = g.node().connect(
@@ -23,7 +23,7 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 3);
+        CPPUNIT_ASSERT(res.read() == 3);
 
         // check an empty run
         g(&stats);
@@ -35,13 +35,13 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 5);
+        CPPUNIT_ASSERT(res.read() == 5);
     }
 
     void testConstant() {
         struct calc::Stats stats;
         calc::Graph g;
-        std::atomic<int> res;
+        calc::Value<int> res;
 
         calc::Constant<int> one(1), two(2);
         auto node = g.node().connect(
@@ -53,7 +53,7 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 3);
+        CPPUNIT_ASSERT(res.read() == 3);
 
         // check an empty run
         g(&stats);
@@ -64,7 +64,7 @@ public:
     void testCircular() {
         struct calc::Stats stats;
         calc::Graph g;
-        std::atomic<int> res(0);
+        calc::Value<int> res;
         
         // setup: connect output to second input
         auto node = g.node().connect(
@@ -78,38 +78,38 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 1);
+        CPPUNIT_ASSERT(res.read() == 1);
 
         // should recycle input
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 2);
+        CPPUNIT_ASSERT(res.read() == 2);
 
         // should recycle input again
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 3);
+        CPPUNIT_ASSERT(res.read() == 3);
 
         // try updating the seed
         node->input<0>().append(g, 5);
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 8);
+        CPPUNIT_ASSERT(res.read() == 8);
 
         // should recycle re-seeded input
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 1);
-        CPPUNIT_ASSERT(res.load() == 9);
+        CPPUNIT_ASSERT(res.read() == 9);
     }
 
     void testChain() {
         struct calc::Stats stats;
         calc::Graph g;
-        std::atomic<bool> res;
+        calc::Value<bool> res;
         
         // setup
         auto in1 = g.node().connect(
@@ -129,7 +129,7 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 3);
         CPPUNIT_ASSERT(stats.worked == 3);
-        CPPUNIT_ASSERT(res.load() == true);
+        CPPUNIT_ASSERT(res.read() == true);
 
         // check an empty run
         g(&stats);
@@ -141,7 +141,7 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 2);
-        CPPUNIT_ASSERT(res.load() == false);
+        CPPUNIT_ASSERT(res.read() == false);
 
         // check an empty run
         g(&stats);
@@ -154,7 +154,7 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 2);
         CPPUNIT_ASSERT(stats.worked == 3);
-        CPPUNIT_ASSERT(res.load() == true);
+        CPPUNIT_ASSERT(res.read() == true);
 
         // check an empty run
         g(&stats);
@@ -166,7 +166,7 @@ public:
     void testUpdatePolicy() {
         struct calc::Stats stats;
         calc::Graph g;
-        std::atomic<int> always_res, onchange_res;
+        calc::Value<int> always_res, onchange_res;
         
         // setup
         auto in = g.node().connect(
@@ -193,8 +193,8 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 5);
         CPPUNIT_ASSERT(stats.worked == 5);
-        CPPUNIT_ASSERT(always_res.load() == 1);
-        CPPUNIT_ASSERT(onchange_res.load() == 1);
+        CPPUNIT_ASSERT(always_res.read() == 1);
+        CPPUNIT_ASSERT(onchange_res.read() == 1);
 
         // check an empty run
         g(&stats);
@@ -206,16 +206,56 @@ public:
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 4); // *not* 5
-        CPPUNIT_ASSERT(always_res.load() == 1);
-        CPPUNIT_ASSERT(onchange_res.load() == 1);
+        CPPUNIT_ASSERT(always_res.read() == 1);
+        CPPUNIT_ASSERT(onchange_res.read() == 1);
 
         // a new input
         in->input<0>().append(g, 2);
         g(&stats);
         CPPUNIT_ASSERT(stats.queued == 1);
         CPPUNIT_ASSERT(stats.worked == 5);
-        CPPUNIT_ASSERT(always_res.load() == 2);
-        CPPUNIT_ASSERT(onchange_res.load() == 2);
+        CPPUNIT_ASSERT(always_res.read() == 2);
+        CPPUNIT_ASSERT(onchange_res.read() == 2);
+    }
+
+    void testSharedPointer() {
+        struct calc::Stats stats;
+        calc::Graph g;
+        calc::Value<std::size_t> res;
+        calc::Constant<std::shared_ptr<std::vector<int>>> it(std::shared_ptr<std::vector<int>>(new std::vector<int>()));
+        
+        // setup
+        auto adder = g.node().connect(
+            [](std::shared_ptr<std::vector<int>> arr, int v) {
+                arr->push_back(v);
+                return arr;
+            },
+            &it,
+            calc::unconnected<int>());
+        auto sizer = g.node().connect(
+            [](std::shared_ptr<std::vector<int>> arr) {
+                return arr->size();
+            },
+            adder.get());
+        sizer->connect(calc::Input<std::size_t>(res));
+        
+        adder->input<1>().append(g, 1);
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 2);
+        CPPUNIT_ASSERT(stats.worked == 2);
+        CPPUNIT_ASSERT(res.read() == 1);
+
+        // check an empty run
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 0);
+        CPPUNIT_ASSERT(stats.worked == 0);
+
+        adder->input<1>().append(g, 5);
+        g(&stats);
+        CPPUNIT_ASSERT(stats.queued == 1);
+        CPPUNIT_ASSERT(stats.worked == 2);
+        CPPUNIT_ASSERT(res.read() == 2);
+
     }
 
     CPPUNIT_TEST_SUITE(GraphTest);
@@ -223,6 +263,7 @@ public:
     CPPUNIT_TEST(testConstant);
     CPPUNIT_TEST(testChain);
     CPPUNIT_TEST(testUpdatePolicy);
+    CPPUNIT_TEST(testSharedPointer);
     CPPUNIT_TEST_SUITE_END();
 };
 
