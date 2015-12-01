@@ -1,5 +1,8 @@
 #include <cppunit/ui/text/TestRunner.h>
 #include <cppunit/extensions/HelperMacros.h>
+#include <chrono>
+#include <thread>
+
 #include "calc.h"
 
 class GraphTest final : public CppUnit::TestFixture  {
@@ -255,6 +258,37 @@ public:
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 2);
         CPPUNIT_ASSERT(res.read() == 2);
+    }
+
+    void testThreaded() {
+        struct calc::Stats stats;
+        calc::Graph g;
+        std::atomic<bool> stop(false);
+        calc::Value<int> res;
+
+        // start the evaluation thread
+        std::thread t(calc::evaluate_repeatedly, std::ref(g), std::ref(stop));
+
+        // setup
+        auto node = g.node().connect(
+            std::plus<int>(),
+            calc::unconnected<int>(),
+            calc::unconnected<int>());
+        node->input<0>().append(g, 1);
+        node->input<1>().append(g, 2);
+        node->connect(calc::Input<int>(res));
+     
+        // ... wait for calculation
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CPPUNIT_ASSERT(res.read() == 3);
+
+        node->input<0>().append(g, 3);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CPPUNIT_ASSERT(res.read() == 5);
+
+        // terminate the evaluation thread
+        stop.store(true, std::memory_order_seq_cst);
+        t.join();
 
     }
 
@@ -264,6 +298,7 @@ public:
     CPPUNIT_TEST(testChain);
     CPPUNIT_TEST(testUpdatePolicy);
     CPPUNIT_TEST(testSharedPointer);
+    CPPUNIT_TEST(testThreaded);
     CPPUNIT_TEST_SUITE_END();
 };
 

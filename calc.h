@@ -16,7 +16,6 @@
 
 // TODO: fixed size work queue
 // TODO: graph loop on change
-// TODO: fix locking
 namespace calc {
     class Graph;
     class Work;
@@ -223,10 +222,15 @@ namespace calc {
      * Statistics for a single evaluation of the calculation graph.
      */
     struct Stats {
+        // how many items were taken off the work queue
     	uint16_t queued;
+        // how many Nodes were eval()'ed
     	uint16_t worked;
+        // how many Nodes were added to this evaluation's heap multiple times (as they were dependent on more than one queued or dependent Node).
     	uint16_t duplicates;
+        // how many dependencies were pushed back on to the Graph's `work_queue` to be evaluted next time
         uint16_t pushed_graph;
+        // how many dependencies were pushed onto this evaluation's work heap to be evaluated in topological order
         uint16_t pushed_heap;
 
         operator std::string() const {
@@ -243,9 +247,17 @@ namespace calc {
 
     class Graph final {
     public:
-        Graph() : ids(1), tombstone(), work_queue(&tombstone) {}
+        Graph() : 
+            ids(1),
+            tombstone(),
+            work_queue(&tombstone) {}
 
-        void operator()(struct Stats* = nullptr);
+        /**
+         * Run the graph evaluation to evalute all Work items on the `work_queue`, and all items recursively dependent on them (at least, as determined by each `Node`'s propagation policy).
+         *
+         * @return true iff any Work items were eval'ed
+         */
+        bool operator()(struct Stats* = nullptr);
         
         NodeBuilder<Always> node();
 
@@ -489,13 +501,13 @@ namespace calc {
      * Doesn't release the locks we have on the Work* items in the queue, as we'll
      * just put them in a heap.
      */
-    void Graph::operator()(struct Stats* stats) {
+    bool Graph::operator()(struct Stats* stats) {
         if (stats)
             *stats = EmptyStats;
 
         auto head = work_queue.exchange(&tombstone);
         if (head == &tombstone)
-            return;
+            return false;
 
         auto work = WorkState(*this, stats);
         for (auto w = head; w != &tombstone; w = w->readnext()) {
@@ -526,45 +538,54 @@ namespace calc {
             // finally finished with this Work - it's not on the Graph queue or the heap
             intrusive_ptr_release(w);
         }
+
+        return true;
     }
 
     void Work::schedule(Graph& g) {
 
-            // don't want work to be deleted while queued
-            intrusive_ptr_add_ref(this);
+        // don't want work to be deleted while queued
+        intrusive_ptr_add_ref(this);
 
-            bool first_time = true;
-            while (true) {
-                std::uintptr_t current = next.load(std::memory_order_acquire);
-                bool locked = current & flags::LOCK;
+        bool first_time = true;
+        while (true) {
+            std::uintptr_t current = next.load(std::memory_order_acquire);
+            bool locked = current & flags::LOCK;
 
-                if (first_time && (current & ~flags::LOCK)) {
-                    // we're already on the work queue, as we're pointing to a non-zero
-                    // pointer
-                    intrusive_ptr_release(this);
-                    return;
-                }
-
-                // add w to the queue by chaning its `next` pointer to point
-                // to the head of the queue
-                Work* head = g.work_queue.load(std::memory_order_acquire);
-                if (!next.compare_exchange_weak(current, reinterpret_cast<std::uintptr_t>(head) | locked)) {
-                    // next was updated under us, retry from the start
-                    continue;
-                }
-
-                if (g.work_queue.compare_exchange_weak(head, this)) {
-                    // success! but keep the intrustive reference active
-                    return;
-                }
-
-                // if we're here we pointed `w.next` to the head of the queue,
-                // but something changed the queue before we could finish. The
-                // next time round the loop we know `current` will not be nullptr,
-                // so set a flag to skip the are-we-already-queued check.
-                first_time = false;
+            if (first_time && (current & ~flags::LOCK)) {
+                // we're already on the work queue, as we're pointing to a non-zero
+                // pointer
+                intrusive_ptr_release(this);
+                return;
             }
+
+            // add w to the queue by chaning its `next` pointer to point
+            // to the head of the queue
+            Work* head = g.work_queue.load(std::memory_order_acquire);
+            if (!next.compare_exchange_weak(current, reinterpret_cast<std::uintptr_t>(head) | locked)) {
+                // next was updated under us, retry from the start
+                continue;
+            }
+
+            if (g.work_queue.compare_exchange_weak(head, this)) {
+                // success! but keep the intrustive reference active
+                return;
+            }
+
+            // if we're here we pointed `w.next` to the head of the queue,
+            // but something changed the queue before we could finish. The
+            // next time round the loop we know `current` will not be nullptr,
+            // so set a flag to skip the are-we-already-queued check.
+            first_time = false;
         }
+    }
+
+    void evaluate_repeatedly(Graph& g, std::atomic<bool>& stop) {
+        while (!stop.load(std::memory_order_consume)) {
+            while (g());
+            std::this_thread::yield();
+        }
+    }
 }
 
 #endif
