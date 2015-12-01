@@ -10,3 +10,6 @@ check: test
 
 clean:
 	rm -f test *.o
+
+format:
+	clang-format -i *.h *.cpp
