@@ -14,7 +14,7 @@
 
 #include <boost/intrusive_ptr.hpp>
 
-namespace calc {
+namespace calcgraph {
     class Graph;
     class Work;
     template <typename>
@@ -181,7 +181,7 @@ namespace calc {
       public:
         /**
          * @brief The node's unique id
-         * @detailed Uniqueness is per Graph, and this id is set by the Graph
+         * @details Uniqueness is per Graph, and this id is set by the Graph
          * object that created the Work.
          */
         const uint32_t id;
@@ -190,7 +190,7 @@ namespace calc {
 
         /**
          * @brief Add this Work to the given Graph's work_queue
-         * @detailed Returns when this `Work` is added to the work_queue of the
+         * @details Returns when this `Work` is added to the work_queue of the
          * given Graph. Could return instantly if already scheduled.
          */
         void schedule(Graph &g);
@@ -242,7 +242,7 @@ namespace calc {
       protected:
         /**
          * @brief Tries to acquire the Work's exclusive lock
-         * @detailed Not re-entrant
+         * @details Not re-entrant
          * @return true if the lock was already taken, false if the lock was
          * successfully acquired.
          */
@@ -253,7 +253,7 @@ namespace calc {
 
         /**
          * @brief Release the Work's exclusive lock
-         * @detail ...by setting the LSB of the next pointer to zero. Only call
+         * @details ...by setting the LSB of the next pointer to zero. Only call
          * if you already hold the lock, or the results are undefined.
          */
         void release() {
@@ -323,7 +323,7 @@ namespace calc {
 
     /**
      * @brief The calcuation-graph-wide state
-     * @detail This class is the only way to make calculation nodes in the
+     * @details This class is the only way to make calculation nodes in the
      * graph, and is in charge of the work_queue, a intrinsic singly-linked list
      * of Work that needs re-evaluating due to upstream changes.
      */
@@ -335,7 +335,7 @@ namespace calc {
          * @brief Run the graph evaluation to evalute all Work items on the
          * `work_queue`, and all items recursively dependent on them (at least,
          * as determined by each `Node`'s propagation policy).
-         * @detailed Doesn't release the locks we have on the Work items in the
+         * @details Doesn't release the locks we have on the Work items in the
          * queue, as we'll just put them in a heap.
          *
          * @return true iff any Work items were eval'ed
@@ -541,7 +541,7 @@ namespace calc {
       private:
         /**
          * @brief Downstream dependencies
-         * @detailed Not threadsafe so controlled by the Work.next LSB locking
+         * @details Not threadsafe so controlled by the Work.next LSB locking
          * mechanism
          */
         std::forward_list<Input<RET>> dependents;

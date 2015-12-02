@@ -9,7 +9,11 @@ check: test
 	./test
 
 clean:
-	rm -f test *.o
+	rm -r test *.o latex 2>/dev/null || true
 
 format:
 	clang-format -i *.h *.cpp
+
+doc:
+	doxygen doxygen.conf
+	$(MAKE) -C latex
