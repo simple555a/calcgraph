@@ -28,15 +28,42 @@ namespace calcgraph {
     template <template <typename> class>
     class NodeBuilder;
 
+    /**
+     * @brief A less-than comparison of Work objects based on their ids
+     */
     struct WorkQueueCmp {
-        constexpr bool operator()(const Work *a, const Work *b);
+        constexpr bool operator()(const Work *a, const Work *b) const;
     };
 
+    /**
+     * @brief The value for a Node to use when its eval() method is called.
+     * @details This object is embedded in the Node class, and atomically stores
+     *the current value of the input.
+     *
+     * @tparam VAL The type of the value stored - must be supported by
+     *std::atomic.
+     */
     template <typename VAL>
     class Value final {
       public:
+        /**
+         * @brief Atomically write the latest value into this class
+         * @details Used by Upstream dependencies (e.g. those the Node is
+         * connected to via the Connectable concept) to pass on new values for
+         * the containing Node to evalute when its eval() method is called.
+         */
         inline void store(VAL v) { val.store(v, std::memory_order_release); }
-        inline VAL read() { return val.load(std::memory_order_acquire); }
+
+        /**
+         * @brief Used by the node to extract the stored value when its eval()
+         * method is called.
+         */
+        inline VAL read() { return val.load(std::memory_order_consume); }
+
+        /**
+         * @brief Atomically exchange the stored value
+         * @details Used by the OnChange propagation policy.
+         */
         inline VAL exchange(VAL other) {
             return val.exchange(other, std::memory_order_acq_rel);
         }
@@ -75,11 +102,28 @@ namespace calcgraph {
         std::shared_ptr<VAL> val;
     };
 
+    /**
+     * @brief A propagation policy that always recalculates downstream
+     * dependencies
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
     template <typename RET>
     struct Always {
         inline constexpr bool operator()(RET) { return true; }
     };
 
+    /**
+     * @brief A propagation policy that recalculates downstream dependencies
+     * only if the Node's output changes (according to the != operator)
+     * @details This method isn't thread-safe, but doesn't need to be as it's
+     * only called by Node.eval() when the calculation lock is held. This policy
+     * stores the last output value in the Node, so increases the size of the
+     * templated Node class and potentially uses even more memory (e.g. if the
+     * output is a std::shared_ptr to a large object).
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
     template <typename RET>
     struct OnChange {
         inline bool operator()(RET latest) {
@@ -190,7 +234,7 @@ namespace calcgraph {
 
         /**
          * @brief Add this Work to the given Graph's work_queue
-         * @details Returns when this `Work` is added to the work_queue of the
+         * @details Returns when this Work is added to the work_queue of the
          * given Graph. Could return instantly if already scheduled.
          */
         void schedule(Graph &g);
@@ -213,9 +257,9 @@ namespace calcgraph {
         friend void intrusive_ptr_release(Work *);
 
         /**
-         * @page locking Locking a Work object
+         * @page worklocking Locking a Work object
          *
-         * We'll use the `next` pointer to store two orthogonal pieces
+         * We'll use the next pointer to store two orthogonal pieces
          * of information. The LSB will store the "locked" - or exclusive lock -
          * flag, and the remaining bits will store the next link in the
          * (intrusive) Graph.work_queue, or nullptr if this node isn't
@@ -333,8 +377,8 @@ namespace calcgraph {
 
         /**
          * @brief Run the graph evaluation to evalute all Work items on the
-         * `work_queue`, and all items recursively dependent on them (at least,
-         * as determined by each `Node`'s propagation policy).
+         * work_queue, and all items recursively dependent on them (at least,
+         * as determined by each Node's propagation policy).
          * @details Doesn't release the locks we have on the Work items in the
          * queue, as we'll just put them in a heap.
          *
@@ -437,9 +481,20 @@ namespace calcgraph {
         friend class Constant;
     };
 
+    /**
+     * @brief A Connectable object that just passes on its initial value to any
+     * Input connected to it
+     * @tparam RET The type of the constant value, and so what type of Inputs
+     * can be connected
+     */
     template <typename RET>
     class Constant : public Connectable<RET> {
       public:
+        /**
+         * @brief Set the value of this Input to the constant
+         * @details The constant is passed on to the Input immediately - not as
+         * part of a Graph evaluation.
+         */
         void connect(Input<RET> in) { in.in->store(value); }
 
         Constant(RET value) noexcept : value(value) {}
@@ -479,8 +534,8 @@ namespace calcgraph {
         void eval(WorkState &ws) override {
             if (!trylock_and_dequeue()) {
                 // another calculation in progress, so put us on the work queue
-                // (which will change the `next` pointer to the next node in the
-                // work queue, not `this`)
+                // (which will change the next pointer to the next node in the
+                // work queue, not this)
                 ws.add_to_queue(*this);
                 return;
             }
@@ -553,14 +608,40 @@ namespace calcgraph {
         PROPAGATE<RET> propagate;
     };
 
+    /**
+     * @brief A builder-pattern object for constructing Nodes
+     * @details Can be reused to create multiple Nodes
+     * @tparam PROPAGATE the propagation policy used by the Nodes it constructs
+     */
     template <template <typename> class PROPAGATE>
     class NodeBuilder final {
       public:
+        /**
+         * @brief Change the propagation policy for the Nodes the builder
+         * constructs
+         * @tparam NEWPROPAGATE the new propagation policy to use
+         * @return A new NodeBuilder object
+         */
         template <template <typename> class NEWPROPAGATE>
         NodeBuilder<NEWPROPAGATE> propagate() {
             return NodeBuilder<NEWPROPAGATE>(g);
         }
 
+        /**
+         * @brief Build a Node
+         *
+         * @param fn The function the node should execute. The newly-constructed
+         *node will be schedule for evaluation on the Graph, so this function
+         *should be able to accept default-constructed values of its Inputs (as
+         *it may be evaluated before upstream dependencies pass on values to it)
+         * @param args Connectable objects (including calcgraph::unconnected()
+         *objects) or appropriately-cast nullptrs to provide values for the
+         *calculation function. The Graph will recalcuate the Node when any one
+         *of these Connectable objects pass on a new value to the Node
+         *(coalescing where possible).
+         * @tparam INPUTS The types of the function's arguments
+         * @return A new Node
+         */
         template <typename FN, typename... INPUTS>
         auto connect(const FN fn, Connectable<INPUTS> *... args) {
 
@@ -594,17 +675,17 @@ namespace calcgraph {
     // see comments in declaration
     void WorkState::add_to_queue(Work &work) {
         // note that the or-equals part of the check is important; if we failed
-        // to calculate `work` this time then `work.id` == `current_id`, and we
+        // to calculate work this time then work.id == current_id, and we
         // want to put the work back on the graph queue for later evaluation.
         if (work.id <= current_id) {
-            // process it next `Graph()`
+            // process it next Graph()
             work.schedule(g);
 
             if (stats)
                 stats->pushed_graph++;
         } else {
             // keep anything around that's going on the heap - we remove a
-            // reference after popping them off the heap and `eval()`'ing them
+            // reference after popping them off the heap and eval()'ing them
             intrusive_ptr_add_ref(&work);
 
             q.push(&work);
@@ -614,7 +695,8 @@ namespace calcgraph {
         }
     }
 
-    constexpr bool WorkQueueCmp::operator()(const Work *a, const Work *b) {
+    constexpr bool WorkQueueCmp::operator()(const Work *a,
+                                            const Work *b) const {
         return a->id > b->id;
     }
 
@@ -680,7 +762,7 @@ namespace calcgraph {
                 return;
             }
 
-            // add w to the queue by chaning its `next` pointer to point
+            // add w to the queue by chaning its next pointer to point
             // to the head of the queue
             Work *head = g.work_queue.load(std::memory_order_acquire);
             if (!next.compare_exchange_weak(
@@ -694,9 +776,9 @@ namespace calcgraph {
                 return;
             }
 
-            // if we're here we pointed `w.next` to the head of the queue,
+            // if we're here we pointed w.next to the head of the queue,
             // but something changed the queue before we could finish. The
-            // next time round the loop we know `current` will not be nullptr,
+            // next time round the loop we know current will not be nullptr,
             // so set a flag to skip the are-we-already-queued check.
             first_time = false;
         }

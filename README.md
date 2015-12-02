@@ -1,4 +1,4 @@
-# CalcGraph
+# CalcGraph {#mainpage}
 
 ## Contributing
 
