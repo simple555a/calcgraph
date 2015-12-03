@@ -259,9 +259,9 @@ namespace calcgraph {
         /**
          * @page worklocking Locking a Work object
          *
-         * We'll use the next pointer to store two orthogonal pieces
-         * of information. The LSB will store the "locked" - or exclusive lock -
-         * flag, and the remaining bits will store the next link in the
+         * We'll use the next pointer of a Work object to store two orthogonal
+         * pieces of information. The LSB will store the "locked" - or exclusive
+         * lock - flag, and the remaining bits will store the next link in the
          * (intrusive) Graph.work_queue, or nullptr if this node isn't
          * scheduled. Note that the locked flag refers to the Work that contains
          * the next pointer, not the Work pointed to.

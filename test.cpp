@@ -3,7 +3,7 @@
 #include <chrono>
 #include <thread>
 
-#include "calc.h"
+#include "calcgraph.h"
 
 class GraphTest final : public CppUnit::TestFixture {
   public:
