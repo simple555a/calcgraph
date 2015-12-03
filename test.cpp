@@ -304,6 +304,48 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT(res.read() == 3);
     }
 
+    template <typename RET>
+    inline std::shared_ptr<std::vector<RET>>
+    vector(std::initializer_list<RET> elements) {
+        auto ret = std::shared_ptr<std::vector<RET>>(new std::vector<RET>());
+        for (auto elem : elements) {
+            ret->push_back(elem);
+        }
+        return ret;
+    }
+
+    void testAccumulator() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Value<std::shared_ptr<std::forward_list<int>>> res;
+
+        // setup
+        auto acc = g.accumulator(calcgraph::unconnected<int>());
+        acc->input().append(g, 3);
+        acc->connect(
+            calcgraph::Input<std::shared_ptr<std::forward_list<int>>>(res));
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        auto expected = vector({3});
+        CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
+                                  res.read()->begin(), res.read()->end()));
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
+
+        acc->input().append(g, 5);
+        acc->input().append(g, 6);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        expected = vector({5, 6});
+        CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
+                                  res.read()->begin(), res.read()->end()));
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testSingleNode);
     CPPUNIT_TEST(testConstant);
@@ -312,6 +354,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testSharedPointer);
     CPPUNIT_TEST(testDisconnect);
     CPPUNIT_TEST(testThreaded);
+    CPPUNIT_TEST(testAccumulator);
     CPPUNIT_TEST_SUITE_END();
 };
 

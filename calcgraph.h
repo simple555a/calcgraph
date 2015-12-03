@@ -25,6 +25,8 @@ namespace calcgraph {
     class Connectable;
     template <typename>
     class Constant;
+    template <typename>
+    class Accumulator;
     template <template <typename> class>
     class NodeBuilder;
 
@@ -33,6 +35,12 @@ namespace calcgraph {
      */
     struct WorkQueueCmp {
         constexpr bool operator()(const Work *a, const Work *b) const;
+    };
+
+    template <typename VAL>
+    class Storeable {
+      public:
+        virtual void store(VAL v) = 0;
     };
 
     /**
@@ -44,7 +52,7 @@ namespace calcgraph {
      *std::atomic.
      */
     template <typename VAL>
-    class Value final {
+    class Value final : public Storeable<VAL> {
       public:
         /**
          * @brief Atomically write the latest value into this class
@@ -52,7 +60,9 @@ namespace calcgraph {
          * connected to via the Connectable concept) to pass on new values for
          * the containing Node to evalute when its eval() method is called.
          */
-        inline void store(VAL v) { val.store(v, std::memory_order_release); }
+        inline void store(VAL v) override {
+            val.store(v, std::memory_order_release);
+        }
 
         /**
          * @brief Used by the node to extract the stored value when its eval()
@@ -81,9 +91,10 @@ namespace calcgraph {
      * @tparam VAL the type of the value the std::shared_ptr points to
      */
     template <typename VAL>
-    class Value<std::shared_ptr<VAL>> final {
+    class Value<std::shared_ptr<VAL>> final
+        : public Storeable<std::shared_ptr<VAL>> {
       public:
-        inline void store(std::shared_ptr<VAL> v) {
+        inline void store(std::shared_ptr<VAL> v) override {
             std::atomic_store_explicit(&val, v, std::memory_order_release);
         }
         inline std::shared_ptr<VAL> read() {
@@ -304,7 +315,7 @@ namespace calcgraph {
          */
         bool trylock() {
             bool waslocked =
-                next.fetch_or(flags::LOCK, std::memory_order_acquire) &
+                next.fetch_or(flags::LOCK, std::memory_order_acq_rel) &
                 flags::LOCK;
             return !waslocked;
         }
@@ -330,7 +341,7 @@ namespace calcgraph {
     /**
      * @brief Statistics for a single evaluation of the calculation graph.
      */
-    struct Stats {
+    struct Stats final {
         /** @brief how many items were taken off the work queue */
         uint16_t queued;
         /** @brief how many Nodes were eval()'ed */
@@ -394,6 +405,13 @@ namespace calcgraph {
          * @details Sets the default propagation policy as Always.
          */
         NodeBuilder<Always> node();
+
+        /**
+         * @brief Creates a new accumulator of the given Connectable
+         * @tparam RET The types of values the accumulator can store
+         */
+        template <typename RET>
+        boost::intrusive_ptr<Accumulator<RET>> accumulator(Connectable<RET> *);
 
       private:
         /**
@@ -461,7 +479,7 @@ namespace calcgraph {
             }
         }
 
-        Input(Value<INPUT> &in) noexcept : in(&in) {}
+        Input(Storeable<INPUT> &in) noexcept : in(&in) {}
         Input(const Input &other) noexcept : in(other.in), ref(other.ref) {}
         Input(Input &&other) noexcept : in(std::move(other.in)),
                                         ref(std::move(other.ref)) {}
@@ -478,7 +496,7 @@ namespace calcgraph {
         }
 
       private:
-        Value<INPUT> *in;
+        Storeable<INPUT> *in;
 
         /**
          * @brief A ref-counted pointer to the owner of the 'in' Value, so it
@@ -486,11 +504,15 @@ namespace calcgraph {
          */
         boost::intrusive_ptr<Work> ref;
 
-        Input(Value<INPUT> &in, boost::intrusive_ptr<Work> ref)
+        Input(Storeable<INPUT> &in, boost::intrusive_ptr<Work> ref)
             : in(&in), ref(ref) {}
 
         template <template <typename> class, typename, typename...>
         friend class Node;
+        template <typename>
+        friend class Accumulator;
+        template <template <typename> class, typename>
+        friend class MultiConnectable;
         template <typename>
         friend class Constant;
     };
@@ -524,6 +546,160 @@ namespace calcgraph {
         RET value;
     };
 
+    template <template <typename> class PROPAGATE, typename RET>
+    class MultiConnectable : public Work, public Connectable<RET> {
+      public:
+        /**
+         * @brief Connect an Input to the output of this Node's FN function
+         * @details Newly-calculated values will be fed to the Input according
+         * to this Node's PROPAGATE propagation policy
+         */
+        void connect(Input<RET> a) override {
+            // spinlock until we can add this
+            while (!trylock()) {
+                std::this_thread::yield();
+            }
+            dependents.push_front(a);
+            release();
+        }
+
+        /**
+         * @brief Call the FN function on the current INPUTS values, and
+         * propagate the result to any connected Inputs
+         * @details Propagation is controlled by the PROPAGATE propagation
+         * policy. This function exclusively locks the Node so only one thread
+         * can call this method at once. If a thread tries to call eval() when
+         * the Node is locked, it will instead put this Node back on the
+         * WorkState Graph's work_queue.
+         */
+        void eval(WorkState &ws) override {
+            if (!this->trylock()) {
+                // another calculation in progress, so put us on the work queue
+                // (which will change the next pointer to the next node in the
+                // work queue, not this)
+                ws.add_to_queue(*this);
+                return;
+            }
+
+            // there's a race condition here: this Node can be put on the work
+            // queue, so if the inputs change we'll get rescheduled and re-ran.
+            // We only snap the atomic values in the next statement, so we could
+            // pick up newer values than the ones that triggered the
+            // recalculation of this Node, so the subsequent re-run would
+            // be unnecessary. See the OnChange propagation policy to mitagate
+            // this (your function should be idempotent!).
+
+            // calculate ourselves
+            RET val = do_eval();
+
+            if (propagate(val)) {
+                for (auto dependent = this->dependents.begin();
+                     dependent != this->dependents.end(); dependent++) {
+
+                    // pass on the new value & schedule the dowstream work
+                    dependent->in->store(val);
+                    if (dependent->ref) {
+                        ws.add_to_queue(*dependent->ref);
+                    }
+                }
+            }
+
+            this->release();
+        }
+
+        /**
+         * @brief Disconnect an Input from the output of this Node's FN function
+         * @details Has no effect if the given Input wasn't connected in the
+         * first place.
+         */
+        void disconnect(Input<RET> a) override {
+            // spinlock until we can add this
+            while (!trylock()) {
+                std::this_thread::yield();
+            }
+            dependents.remove(a);
+            release();
+        }
+
+      private:
+        /**
+         * @brief Downstream dependencies
+         * @details Not threadsafe so controlled by the Work.next LSB locking
+         * mechanism
+         */
+        std::forward_list<Input<RET>> dependents;
+
+        /**
+         * @brief The policy on when to propagate newly-calcuated values to
+         * dependents
+         */
+        PROPAGATE<RET> propagate;
+
+      protected:
+        MultiConnectable(uint32_t id) : Work(id) {}
+
+        virtual RET do_eval() = 0;
+    };
+
+    template <typename RET>
+    class Accumulator final
+        : public MultiConnectable<Always,
+                                  std::shared_ptr<std::forward_list<RET>>>,
+          private Storeable<RET> {
+
+      public:
+        /**
+         * @brief Returns the Input to the accumulator
+         * @details This can be connected to multiple Connectables, or multiple
+         * returned Inputs can be connected - in both cases all appended objects
+         * will be accumulated in the returned std::vectors.
+         */
+        Input<RET> input() {
+            return Input<RET>(*this, boost::intrusive_ptr<Work>(this));
+        }
+
+        void store(RET val) override {
+            Element *e = new Element(val);
+            while (true) {
+                Element *snap = head.load(std::memory_order_acquire);
+                e->next.store(snap, std::memory_order_release);
+                if (head.compare_exchange_weak(snap, e))
+                    return;
+            }
+        }
+
+      protected:
+        std::shared_ptr<std::forward_list<RET>> do_eval() override {
+            auto ret = std::shared_ptr<std::forward_list<RET>>(
+                new std::forward_list<RET>());
+
+            Element *e = head.exchange(nullptr, std::memory_order_acq_rel);
+            while (e != nullptr) {
+                ret->push_front(e->val);
+                Element *next = e->next.load(std::memory_order_consume);
+                delete e;
+                e = next;
+            }
+
+            return ret;
+        }
+
+      private:
+        Accumulator(uint32_t id)
+            : MultiConnectable<Always, std::shared_ptr<std::forward_list<RET>>>(
+                  id),
+              head() {}
+        friend class Graph;
+
+        struct Element final {
+            std::atomic<Element *> next;
+            RET val;
+            Element(RET val) : next(), val(val) {}
+        };
+
+        std::atomic<Element *> head;
+    };
+
     /**
      * @brief A Work item that evaluates a function, and propages the results to
      * any connected Inputs.
@@ -540,8 +716,8 @@ namespace calcgraph {
      */
     template <template <typename> class PROPAGATE, typename FN,
               typename... INPUTS>
-    class Node final : public Work,
-                       public Connectable<std::result_of_t<FN(INPUTS...)>> {
+    class Node final
+        : public MultiConnectable<PROPAGATE, std::result_of_t<FN(INPUTS...)>> {
       public:
         using RET = typename std::result_of_t<FN(INPUTS...)>;
 
@@ -570,83 +746,17 @@ namespace calcgraph {
             return inputtuple_fn(std::index_sequence_for<INPUTS...>{});
         }
 
-        /**
-         * @brief Connect an Input to the output of this Node's FN function
-         * @details Newly-calculated values will be fed to the Input according
-         * to this Node's PROPAGATE propagation policy
-         */
-        void connect(Input<RET> a) override {
-            // spinlock until we can add this
-            while (!trylock()) {
-                std::this_thread::yield();
-            }
-            dependents.push_front(a);
-            release();
-        }
-
-        /**
-         * @brief Disconnect an Input from the output of this Node's FN function
-         * @details Has no effect if the given Input wasn't connected in the
-         * first place.
-         */
-        void disconnect(Input<RET> a) override {
-            // spinlock until we can add this
-            while (!trylock()) {
-                std::this_thread::yield();
-            }
-            dependents.remove(a);
-            release();
-        }
-
-        /**
-         * @brief Call the FN function on the current INPUTS values, and
-         * propagate the result to any connected Inputs
-         * @details Propagation is controlled by the PROPAGATE propagation
-         * policy. This function exclusively locks the Node so only one thread
-         * can call this method at once. If a thread tries to call eval() when
-         * the Node is locked, it will instead put this Node back on the
-         * WorkState Graph's work_queue.
-         */
-        void eval(WorkState &ws) override {
-            if (!trylock()) {
-                // another calculation in progress, so put us on the work queue
-                // (which will change the next pointer to the next node in the
-                // work queue, not this)
-                ws.add_to_queue(*this);
-                return;
-            }
-
-            // there's a race condition here: this Node can be put on the work
-            // queue, so if the inputs change we'll get rescheduled and re-ran.
-            // We only snap the atomic values in the next statement, so we could
-            // pick up newer values than the ones that triggered the
-            // recalculation of this Node, so the subsequent re-run would
-            // be unnecessary. See the OnChange propagation policy to mitagate
-            // this (your function should be idempotent!).
-
-            // calculate ourselves
-            RET val = call_fn(std::index_sequence_for<INPUTS...>{});
-
-            if (propagate(val)) {
-                for (auto dependent = dependents.begin();
-                     dependent != dependents.end(); dependent++) {
-
-                    // pass on the new value & schedule the dowstream work
-                    dependent->in->store(val);
-                    if (dependent->ref) {
-                        ws.add_to_queue(*dependent->ref);
-                    }
-                }
-            }
-
-            release();
+      protected:
+        RET do_eval() override {
+            return call_fn(std::index_sequence_for<INPUTS...>{});
         }
 
       private:
         const FN fn;
         std::tuple<Value<INPUTS>...> inputs;
 
-        Node(uint32_t id, const FN fn) : Work(id), fn(fn) {}
+        Node(uint32_t id, const FN fn)
+            : MultiConnectable<PROPAGATE, RET>(id), fn(fn) {}
         friend class Graph;
 
         template <std::size_t... I>
@@ -660,20 +770,6 @@ namespace calcgraph {
 
         template <template <typename> class>
         friend class NodeBuilder;
-
-      private:
-        /**
-         * @brief Downstream dependencies
-         * @details Not threadsafe so controlled by the Work.next LSB locking
-         * mechanism
-         */
-        std::forward_list<Input<RET>> dependents;
-
-        /**
-         * @brief The policy on when to propagate newly-calcuated values to
-         * dependents
-         */
-        PROPAGATE<RET> propagate;
     };
 
     /**
@@ -739,6 +835,17 @@ namespace calcgraph {
 
     // see comments in declaration
     NodeBuilder<Always> Graph::node() { return NodeBuilder<Always>(*this); }
+
+    // see comments in declaration
+    template <typename RET>
+    boost::intrusive_ptr<Accumulator<RET>>
+    Graph::accumulator(Connectable<RET> *arg) {
+        auto acc =
+            boost::intrusive_ptr<Accumulator<RET>>(new Accumulator<RET>(ids++));
+        calcgraph::connect(arg, acc->input());
+        acc->schedule(*this);
+        return acc;
+    }
 
     // see comments in declaration
     void WorkState::add_to_queue(Work &work) {
