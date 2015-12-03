@@ -505,6 +505,20 @@ namespace calcgraph {
         RET value;
     };
 
+    /**
+     * @brief A Work item that evaluates a function, and propages the results to
+     * any connected Inputs.
+     * @details The key part of the calculation graph - constructed using a
+     * NodeBuilder obtained from Graph.node().
+     *
+     * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange), used
+     * to decide whether to notify connected Inputs after the FN function is
+     * evaluated.
+     * @tparam FN The function to evaluate. Must be able to operate on
+     * default-constructed INPUTS arguments, as it may be invoked before
+     * upstream dependencies pass on their values
+     * @tparam INPUTS The types of the parameters of the FN fuction.
+     */
     template <template <typename> class PROPAGATE, typename FN,
               typename... INPUTS>
     class Node final : public Work,
@@ -512,16 +526,36 @@ namespace calcgraph {
       public:
         using RET = typename std::result_of_t<FN(INPUTS...)>;
 
+        /**
+         * @brief Get an Input object associated with the N'th argument of this
+         * Node's function FN
+         * @details Pass this object to a Connectable object so this Node is
+         * evaluated whenever that Connectable changes, or set values on the
+         * Input (i.e. pass values to the FN function) directly using
+         * Input.append().
+         *
+         * @tparam N which function argument to get
+         */
         template <std::size_t N>
         auto input() -> Input<std::tuple_element_t<N, std::tuple<INPUTS...>>> {
             return Input<std::tuple_element_t<N, std::tuple<INPUTS...>>>(
                 std::get<N>(inputs), boost::intrusive_ptr<Work>(this));
         }
 
+        /**
+         * @brief Return a Tuple of all the Inputs to this function.
+         * @details Equivalent to calling input() for the N arguments of the FN
+         * function
+         */
         std::tuple<Input<INPUTS>...> inputtuple() {
             return inputtuple_fn(std::index_sequence_for<INPUTS...>{});
         }
 
+        /**
+         * @brief Connect an Input to the output of this Node's FN function
+         * @details Newly-calculated values will be fed to the Input according
+         * to this Node's PROPAGATE propagation policy
+         */
         void connect(Input<RET> a) override {
             // spinlock until we can add this
             while (!trylock()) {
@@ -531,6 +565,15 @@ namespace calcgraph {
             release();
         }
 
+        /**
+         * @brief Call the FN function on the current INPUTS values, and
+         * propagate the result to any connected Inputs
+         * @details Propagation is controlled by the PROPAGATE propagation
+         * policy. This function exclusively locks the Node so only one thread
+         * can call this method at once. If a thread tries to call eval() when
+         * the Node is locked, it will instead put this Node back on the
+         * WorkState Graph's work_queue.
+         */
         void eval(WorkState &ws) override {
             if (!trylock_and_dequeue()) {
                 // another calculation in progress, so put us on the work queue
@@ -541,20 +584,12 @@ namespace calcgraph {
             }
 
             // there's a race condition here: this Node can be put on the work
-            // queue, so
-            // if the inputs change we'll get rescheduled and re-ran. We only
-            // snap the
-            // atomic
-            // values in the next statement, so we could pick up newer values
-            // than the
-            // ones that
-            // triggered the recalculation of this Node, so the subsequent
-            // re-run would
-            // be
-            // unnecessary. See the OnChange propagation policy to mitagate this
-            // (your
-            // function
-            // should be idempotent!).
+            // queue, so if the inputs change we'll get rescheduled and re-ran.
+            // We only snap the atomic values in the next statement, so we could
+            // pick up newer values than the ones that triggered the
+            // recalculation of this Node, so the subsequent re-run would
+            // be unnecessary. See the OnChange propagation policy to mitagate
+            // this (your function should be idempotent!).
 
             // calculate ourselves
             RET val = call_fn(std::index_sequence_for<INPUTS...>{});
@@ -582,11 +617,11 @@ namespace calcgraph {
         friend class Graph;
 
         template <std::size_t... I>
-        RET call_fn(std::index_sequence<I...>) {
+        inline RET call_fn(std::index_sequence<I...>) {
             return fn(std::get<I>(inputs).read()...);
         }
         template <std::size_t... I>
-        auto inputtuple_fn(std::index_sequence<I...>) {
+        inline auto inputtuple_fn(std::index_sequence<I...>) {
             return std::make_tuple<Input<INPUTS>...>(input<I>()...);
         }
 
@@ -787,7 +822,9 @@ namespace calcgraph {
     /**
      * @brief Repeatedly evaluate the Graph's work queue
      * @details Evaluate in a busy-loop, only yielding when there's no work to
-     * do. Doesn't block.
+     * do. Doesn't block. This avoids having to pay the cost of mutex-related
+     * system calls if we slept on a mutex (and appending an Input would have to
+     * lock the same mutex when notifying this evalution thread).
      *
      * @param g The graph containing the work_queue to evaluate
      * @param stop When set, the thread will exit its busy-loop the next time it
