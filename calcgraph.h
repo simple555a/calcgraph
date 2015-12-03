@@ -282,11 +282,16 @@ namespace calcgraph {
 
       public:
         /**
-         * @brief Extracts the pointer to the next node on the work_queue, or
+         * @brief Fetch and clear the Work item's next-pointer
+         * @details This isn't the same as remove this Work item from the
+         * Graph's work queue (if it was on it) as it doesn't clear the
+         * intrinsic next pointer of any Work item pointing to this one.
+         * @returns Extracts the pointer to the next node on the work_queue, or
          * nullptr if this Work isn't on a Graph's work_queue.
          */
-        Work *readnext() {
-            std::uintptr_t p = next.load(std::memory_order_acquire);
+        Work *dequeue() {
+            std::uintptr_t p =
+                next.fetch_and(flags::LOCK, std::memory_order_acq_rel);
             return reinterpret_cast<Work *>(p & ~flags::LOCK);
         }
 
@@ -311,20 +316,6 @@ namespace calcgraph {
          */
         void release() {
             next.fetch_and(~flags::LOCK, std::memory_order_release);
-        }
-
-        /**
-         * @brief As trylock, but will also reset the queue pointer to nullptr,
-         * taking us off the Graph's work_queue if we were on it (regardless of
-         * whether we succeeded in acquiring the lock).
-         * @return true if the lock was already taken, false if the lock was
-         * successfully acquired.
-         */
-        bool trylock_and_dequeue() {
-            bool waslocked =
-                next.exchange(flags::LOCK, std::memory_order_acq_rel) &
-                flags::LOCK;
-            return !waslocked;
         }
     };
 
@@ -617,7 +608,7 @@ namespace calcgraph {
          * WorkState Graph's work_queue.
          */
         void eval(WorkState &ws) override {
-            if (!trylock_and_dequeue()) {
+            if (!trylock()) {
                 // another calculation in progress, so put us on the work queue
                 // (which will change the next pointer to the next node in the
                 // work queue, not this)
@@ -786,11 +777,20 @@ namespace calcgraph {
         if (head == &tombstone)
             return false;
 
-        auto work = WorkState(*this, stats);
-        for (auto w = head; w != &tombstone; w = w->readnext()) {
+        WorkState work(*this, stats);
+        Work *w = head;
+        while (w != &tombstone) {
+            // remove us from the work queue. Note that this is slightly
+            // inefficient, as w could be put back on the Graph's work_queue
+            // before it's been evaluated in this function call, and so is
+            // needlessly evaluated a second time.
+            Work *next = w->dequeue();
+
             work.q.push(w);
             if (stats)
                 stats->queued++;
+
+            w = next;
         }
 
         while (!work.q.empty()) {
