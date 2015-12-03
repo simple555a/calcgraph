@@ -322,7 +322,7 @@ namespace calcgraph {
          */
         bool trylock_and_dequeue() {
             bool waslocked =
-                next.exchange(flags::LOCK, std::memory_order_acquire) &
+                next.exchange(flags::LOCK, std::memory_order_acq_rel) &
                 flags::LOCK;
             return !waslocked;
         }
@@ -782,7 +782,7 @@ namespace calcgraph {
         if (stats)
             *stats = EmptyStats;
 
-        auto head = work_queue.exchange(&tombstone);
+        auto head = work_queue.exchange(&tombstone, std::memory_order_acq_rel);
         if (head == &tombstone)
             return false;
 
