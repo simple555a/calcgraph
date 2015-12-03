@@ -182,6 +182,13 @@ namespace calcgraph {
          * given object.
          */
         virtual void connect(Input<RET>) = 0;
+
+        /**
+         * @brief Disconnects the given Input from this object.
+         * @details Must be thread-safe and has no effect if the given Input
+         * wasn't already connected
+         */
+        virtual void disconnect(Input<RET>) = 0;
     };
 
     /**
@@ -463,6 +470,17 @@ namespace calcgraph {
         Input(Input &&other) noexcept : in(std::move(other.in)),
                                         ref(std::move(other.ref)) {}
 
+        /**
+         * @brief Equality semantics, based on what it's an Input to, but not
+         * what the current value is.
+         */
+        inline bool operator==(const Input &other) const {
+            return in == other.in;
+        }
+        inline bool operator!=(const Input &other) const {
+            return !(*this == other);
+        }
+
       private:
         Value<INPUT> *in;
 
@@ -495,7 +513,12 @@ namespace calcgraph {
          * @details The constant is passed on to the Input immediately - not as
          * part of a Graph evaluation.
          */
-        void connect(Input<RET> in) { in.in->store(value); }
+        void connect(Input<RET> in) override { in.in->store(value); }
+
+        /**
+         * @brief Has no effect
+         */
+        void disconnect(Input<RET> in) override {}
 
         Constant(RET value) noexcept : value(value) {}
         Constant(Constant &&other) noexcept : value(std::move(other.value)) {}
@@ -562,6 +585,20 @@ namespace calcgraph {
                 std::this_thread::yield();
             }
             dependents.push_front(a);
+            release();
+        }
+
+        /**
+         * @brief Disconnect an Input from the output of this Node's FN function
+         * @details Has no effect if the given Input wasn't connected in the
+         * first place.
+         */
+        void disconnect(Input<RET> a) override {
+            // spinlock until we can add this
+            while (!trylock()) {
+                std::this_thread::yield();
+            }
+            dependents.remove(a);
             release();
         }
 

@@ -9,7 +9,7 @@ check: test
 	./test
 
 clean:
-	rm -r test *.o latex 2>/dev/null || true
+	rm -r test *.o latex *.dSYM 2>/dev/null || true
 
 format:
 	clang-format -i *.h *.cpp

@@ -237,6 +237,20 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT(res.read() == 2);
     }
 
+    template <typename T>
+    inline void waitAndAssert(calcgraph::Value<T> &actual,
+                              const T expected) const {
+        std::this_thread::yield();
+
+        uint8_t tries = 0;
+        while (tries++ < 100) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (actual.read() == expected)
+                return;
+        }
+        CPPUNIT_ASSERT(actual.read() == expected); // just fail
+    }
+
     void testThreaded() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
@@ -256,18 +270,47 @@ class GraphTest final : public CppUnit::TestFixture {
         node->connect(calcgraph::Input<int>(res));
 
         // ... wait for calculation
-        std::this_thread::yield();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        CPPUNIT_ASSERT(res.read() == 3);
+        waitAndAssert<int>(res, 3);
 
         node->input<0>().append(g, 3);
-        std::this_thread::yield();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        CPPUNIT_ASSERT(res.read() == 5);
+        waitAndAssert<int>(res, 5);
 
         // terminate the evaluation thread
         stop.store(true, std::memory_order_seq_cst);
         t.join();
+    }
+
+    void testDisconnect() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Value<int> res;
+
+        // setup
+        auto node =
+            g.node().connect(int_identity, calcgraph::unconnected<int>());
+        node->input<0>().append(g, 1);
+        node->connect(calcgraph::Input<int>(res));
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 1);
+
+        // update an input
+        node->input<0>().append(g, 3);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 3);
+
+        node->disconnect(calcgraph::Input<int>(res));
+
+        // update an input, again
+        node->input<0>().append(g, 5);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 3);
     }
 
     CPPUNIT_TEST_SUITE(GraphTest);
@@ -276,6 +319,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testChain);
     CPPUNIT_TEST(testUpdatePolicy);
     CPPUNIT_TEST(testSharedPointer);
+    CPPUNIT_TEST(testDisconnect);
     CPPUNIT_TEST(testThreaded);
     CPPUNIT_TEST_SUITE_END();
 };
