@@ -298,8 +298,10 @@ namespace calcgraph {
          * successfully acquired.
          */
         bool trylock() {
-            return next.fetch_or(flags::LOCK, std::memory_order_acquire) &
-                   flags::LOCK;
+            bool waslocked =
+                next.fetch_or(flags::LOCK, std::memory_order_acquire) &
+                flags::LOCK;
+            return !waslocked;
         }
 
         /**
@@ -313,13 +315,16 @@ namespace calcgraph {
 
         /**
          * @brief As trylock, but will also reset the queue pointer to nullptr,
-         * taking us off the Graph's work_queue if we were on it.
+         * taking us off the Graph's work_queue if we were on it (regardless of
+         * whether we succeeded in acquiring the lock).
+         * @return true if the lock was already taken, false if the lock was
+         * successfully acquired.
          */
         bool trylock_and_dequeue() {
-            std::uintptr_t p = next.load(std::memory_order_acquire);
-            return !(p & flags::LOCK) &&
-                   next.compare_exchange_strong(p, flags::LOCK,
-                                                std::memory_order_acq_rel);
+            bool waslocked =
+                next.exchange(flags::LOCK, std::memory_order_acquire) &
+                flags::LOCK;
+            return !waslocked;
         }
     };
 
@@ -828,8 +833,7 @@ namespace calcgraph {
 
             if (first_time && (current & ~flags::LOCK)) {
                 // we're already on the work queue, as we're pointing to a
-                // non-zero
-                // pointer
+                // non-zero pointer
                 intrusive_ptr_release(this);
                 return;
             }
@@ -869,8 +873,8 @@ namespace calcgraph {
      */
     void evaluate_repeatedly(Graph &g, std::atomic<bool> &stop) {
         while (!stop.load(std::memory_order_consume)) {
-            while (g())
-                ;
+            while (g()) {
+            }
             std::this_thread::yield();
         }
     }

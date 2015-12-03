@@ -237,22 +237,7 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT(res.read() == 2);
     }
 
-    template <typename T>
-    inline void waitAndAssert(calcgraph::Value<T> &actual,
-                              const T expected) const {
-        std::this_thread::yield();
-
-        uint8_t tries = 0;
-        while (tries++ < 100) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            if (actual.read() == expected)
-                return;
-        }
-        CPPUNIT_ASSERT(actual.read() == expected); // just fail
-    }
-
     void testThreaded() {
-        struct calcgraph::Stats stats;
         calcgraph::Graph g;
         std::atomic<bool> stop(false);
         calcgraph::Value<int> res;
@@ -270,10 +255,16 @@ class GraphTest final : public CppUnit::TestFixture {
         node->connect(calcgraph::Input<int>(res));
 
         // ... wait for calculation
-        waitAndAssert<int>(res, 3);
+        std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CPPUNIT_ASSERT(res.read() == 3);
 
         node->input<0>().append(g, 3);
-        waitAndAssert<int>(res, 5);
+
+        // ... wait for calculation
+        std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CPPUNIT_ASSERT(res.read() == 5);
 
         // terminate the evaluation thread
         stop.store(true, std::memory_order_seq_cst);
