@@ -139,7 +139,7 @@ namespace calcgraph {
          * far
          */
         inline void store(input_type val) override {
-            Element *e = new Element(val);
+            Element *e = new Element(std::move(val));
             while (true) {
                 Element *snap = head.load(std::memory_order_acquire);
                 e->next.store(snap, std::memory_order_release);
@@ -177,7 +177,7 @@ namespace calcgraph {
         struct Element final {
             std::atomic<Element *> next;
             VAL val;
-            Element(VAL val) : next(), val(val) {}
+            Element(VAL &&val) : next(), val(val) {}
         };
 
         std::atomic<Element *> head;
@@ -767,8 +767,16 @@ namespace calcgraph {
 
     /**
      * @brief A builder-pattern object for constructing Nodes
-     * @details Can be reused to create multiple Nodes
+     * @details Can be reused to create multiple Nodes. Arguments can be passed
+     * either to successive calls to latest and accumulate (if you want to
+     * specify the input policy) or passed all at once to connect (if you just
+     * need the default input policy, Latest), or a mixture (in which case the
+     * parameters passed to connect come after those passed to latest and
+     * accumulate).
+     *
      * @tparam PROPAGATE the propagation policy used by the Nodes it constructs
+     * @tparam INPUTS the input policies of the first N arguments of the
+     *function passed to connect
      */
     template <template <typename> class PROPAGATE, class... INPUTS>
     class NodeBuilder final {
@@ -784,11 +792,17 @@ namespace calcgraph {
             return NodeBuilder<NEWPROPAGATE, INPUTS...>(g, connected);
         }
 
+        /**
+         * @brief Add an argument with an Accumulate input policy
+         */
         template <typename VAL>
         auto accumulate(Connectable<VAL> *arg) {
             return doconnect<Accumulate, VAL>(arg);
         }
 
+        /**
+         * @brief Add an argument with a Latest input policy
+         */
         template <typename VAL>
         auto latest(Connectable<VAL> *arg) {
             return doconnect<Latest, VAL>(arg);
