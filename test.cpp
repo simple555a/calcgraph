@@ -6,13 +6,17 @@
 #include "calcgraph.h"
 
 class GraphTest final : public CppUnit::TestFixture {
+    using intlist = std::shared_ptr<std::forward_list<int>>;
+
   public:
     const std::function<int(int)> int_identity = [](int a) { return a; };
+    const std::function<intlist(intlist)> intlist_identity =
+        [](intlist a) { return a; };
 
     void testSingleNode() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<int> res;
+        calcgraph::Latest<int> res;
 
         // setup
         auto node =
@@ -43,7 +47,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testConstant() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<int> res;
+        calcgraph::Latest<int> res;
 
         calcgraph::Constant<int> one(1), two(2);
         auto node = g.node().connect(std::plus<int>(), &one, &two);
@@ -63,7 +67,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testCircular() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<int> res;
+        calcgraph::Latest<int> res;
 
         // setup: connect output to second input
         auto node =
@@ -107,7 +111,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testChain() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<bool> res;
+        calcgraph::Latest<bool> res;
 
         // setup
         auto in1 =
@@ -158,7 +162,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testUpdatePolicy() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<int> always_res, onchange_res;
+        calcgraph::Latest<int> always_res, onchange_res;
 
         // setup
         auto in = g.node().connect(int_identity, calcgraph::unconnected<int>());
@@ -203,7 +207,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testSharedPointer() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<std::size_t> res;
+        calcgraph::Latest<std::size_t> res;
         calcgraph::Constant<std::shared_ptr<std::vector<int>>> it(
             std::shared_ptr<std::vector<int>>(new std::vector<int>()));
 
@@ -240,7 +244,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testThreaded() {
         calcgraph::Graph g;
         std::atomic<bool> stop(false);
-        calcgraph::Value<int> res;
+        calcgraph::Latest<int> res;
 
         // start the evaluation thread
         std::thread t(calcgraph::evaluate_repeatedly, std::ref(g),
@@ -274,7 +278,7 @@ class GraphTest final : public CppUnit::TestFixture {
     void testDisconnect() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<int> res;
+        calcgraph::Latest<int> res;
 
         // setup
         auto node =
@@ -317,11 +321,13 @@ class GraphTest final : public CppUnit::TestFixture {
     void testAccumulator() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Value<std::shared_ptr<std::forward_list<int>>> res;
+        calcgraph::Latest<std::shared_ptr<std::forward_list<int>>> res;
 
         // setup
-        auto acc = g.accumulator(calcgraph::unconnected<int>());
-        acc->input().append(g, 3);
+        auto acc = g.node()
+                       .accumulate(calcgraph::unconnected<int>())
+                       .connect(intlist_identity);
+        acc->input<0>().append(g, 3);
         acc->connect(
             calcgraph::Input<std::shared_ptr<std::forward_list<int>>>(res));
 
@@ -336,8 +342,8 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
 
-        acc->input().append(g, 5);
-        acc->input().append(g, 6);
+        acc->input<0>().append(g, 5);
+        acc->input<0>().append(g, 6);
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);

@@ -25,9 +25,7 @@ namespace calcgraph {
     class Connectable;
     template <typename>
     class Constant;
-    template <typename>
-    class Accumulator;
-    template <template <typename> class>
+    template <template <typename> class, class...>
     class NodeBuilder;
 
     /**
@@ -44,23 +42,27 @@ namespace calcgraph {
     };
 
     /**
-     * @brief The value for a Node to use when its eval() method is called.
+     * @brief An input policy that returns the latest value of the Input to the
+     * Node to use when its eval() method is called.
      * @details This object is embedded in the Node class, and atomically stores
-     *the current value of the input.
+     * the current value of the input.
      *
      * @tparam VAL The type of the value stored - must be supported by
-     *std::atomic.
+     * std::atomic.
      */
     template <typename VAL>
-    class Value final : public Storeable<VAL> {
+    class Latest final : public Storeable<VAL> {
       public:
+        using input_type = VAL;
+        using output_type = VAL;
+
         /**
          * @brief Atomically write the latest value into this class
          * @details Used by Upstream dependencies (e.g. those the Node is
          * connected to via the Connectable concept) to pass on new values for
          * the containing Node to evalute when its eval() method is called.
          */
-        inline void store(VAL v) override {
+        inline void store(input_type v) override {
             val.store(v, std::memory_order_release);
         }
 
@@ -68,49 +70,117 @@ namespace calcgraph {
          * @brief Used by the node to extract the stored value when its eval()
          * method is called.
          */
-        inline VAL read() { return val.load(std::memory_order_consume); }
+        inline output_type read() {
+            return val.load(std::memory_order_consume);
+        }
 
         /**
          * @brief Atomically exchange the stored value
          * @details Used by the OnChange propagation policy.
          */
-        inline VAL exchange(VAL other) {
+        inline input_type exchange(input_type other) {
             return val.exchange(other, std::memory_order_acq_rel);
         }
 
-        Value() noexcept : val() {}
-        Value(const Value &other) noexcept : val(other.val) {}
-        Value(Value &&other) noexcept : val(std::move(other.val)) {}
+        Latest() noexcept : val() {}
+        Latest(const Latest &other) noexcept : val(other.val) {}
+        Latest(Latest &&other) noexcept : val(std::move(other.val)) {}
 
       private:
         std::atomic<VAL> val;
     };
 
     /**
-     * @brief A partial specialization of Value for std::shared_ptr
+     * @brief A partial specialization of Latest for std::shared_ptr
      * @tparam VAL the type of the value the std::shared_ptr points to
      */
     template <typename VAL>
-    class Value<std::shared_ptr<VAL>> final
+    class Latest<std::shared_ptr<VAL>> final
         : public Storeable<std::shared_ptr<VAL>> {
       public:
-        inline void store(std::shared_ptr<VAL> v) override {
+        using input_type = std::shared_ptr<VAL>;
+        using output_type = std::shared_ptr<VAL>;
+
+        inline void store(input_type v) override {
             std::atomic_store_explicit(&val, v, std::memory_order_release);
         }
-        inline std::shared_ptr<VAL> read() {
+        inline output_type read() {
             return std::atomic_load_explicit(&val, std::memory_order_acquire);
         }
-        inline std::shared_ptr<VAL> exchange(std::shared_ptr<VAL> other) {
+        inline input_type exchange(input_type other) {
             return std::atomic_exchange_explicit(&val, other,
                                                  std::memory_order_acq_rel);
         }
 
-        Value() noexcept : val() {}
-        Value(const Value &other) noexcept : val(other.val) {}
-        Value(Value &&other) noexcept : val(std::move(other.val)) {}
+        Latest() noexcept : val() {}
+        Latest(const Latest &other) noexcept : val(other.val) {}
+        Latest(Latest &&other) noexcept : val(std::move(other.val)) {}
 
       private:
         std::shared_ptr<VAL> val;
+    };
+
+    /**
+     * @brief An Input policy that accumulates any values fed to it and returns
+     * them all to its containing Node as a std::forward_list
+     * @details Useful if you can't afford to drop any values from upstream
+     * dependencies
+     *
+     * @tparam VAL The type of the value stored - doesn't have to be atomic
+     */
+    template <typename VAL>
+    class Accumulate final : public Storeable<VAL> {
+      public:
+        using input_type = VAL;
+        using output_type = std::shared_ptr<std::forward_list<VAL>>;
+
+        /**
+         * @brief Atomically adds another value to the ones we've accumulated so
+         * far
+         */
+        inline void store(input_type val) override {
+            Element *e = new Element(val);
+            while (true) {
+                Element *snap = head.load(std::memory_order_acquire);
+                e->next.store(snap, std::memory_order_release);
+                if (head.compare_exchange_weak(snap, e))
+                    return;
+            }
+        }
+
+        /**
+         * @brief Used by the node to extract any stored values its eval()
+         * method is called.
+         * @returns An empty list if there have been no new values since the
+         * last time read() was called, or a std::forward_list of values in the
+         * order that they were received.
+         */
+        inline output_type read() {
+            auto ret = output_type(new std::forward_list<VAL>());
+
+            Element *e = head.exchange(nullptr, std::memory_order_acq_rel);
+            while (e != nullptr) {
+                ret->push_front(e->val);
+                Element *next = e->next.load(std::memory_order_consume);
+                delete e;
+                e = next;
+            }
+
+            return ret;
+        }
+
+        Accumulate() noexcept : head() {}
+        Accumulate(const Accumulate &other) noexcept : head(other.head) {}
+        Accumulate(Accumulate &&other) noexcept : head(std::move(other.head)) {}
+
+      private:
+        struct Element final {
+            std::atomic<Element *> next;
+            VAL val;
+            Element(VAL val) : next(), val(val) {}
+        };
+
+        std::atomic<Element *> head;
     };
 
     /**
@@ -142,7 +212,7 @@ namespace calcgraph {
         }
 
       private:
-        Value<RET> last;
+        Latest<RET> last;
     };
 
     /**
@@ -406,13 +476,6 @@ namespace calcgraph {
          */
         NodeBuilder<Always> node();
 
-        /**
-         * @brief Creates a new accumulator of the given Connectable
-         * @tparam RET The types of values the accumulator can store
-         */
-        template <typename RET>
-        boost::intrusive_ptr<Accumulator<RET>> accumulator(Connectable<RET> *);
-
       private:
         /**
          * @brief The source of Work ids
@@ -441,7 +504,7 @@ namespace calcgraph {
         friend class WorkState;
         template <typename>
         friend class Input;
-        template <template <typename> class>
+        template <template <typename> class, class...>
         friend class NodeBuilder;
         friend class Work;
 
@@ -499,7 +562,7 @@ namespace calcgraph {
         Storeable<INPUT> *in;
 
         /**
-         * @brief A ref-counted pointer to the owner of the 'in' Value, so it
+         * @brief A ref-counted pointer to the owner of the 'in' Latest, so it
          * doesn't get freed while we're still alive
          */
         boost::intrusive_ptr<Work> ref;
@@ -546,9 +609,57 @@ namespace calcgraph {
         RET value;
     };
 
-    template <template <typename> class PROPAGATE, typename RET>
-    class MultiConnectable : public Work, public Connectable<RET> {
+    /**
+     * @brief A Work item that evaluates a function, and propages the results to
+     * any connected Inputs.
+     * @details The key part of the calculation graph - constructed using a
+     * NodeBuilder obtained from Graph.node().
+     *
+     * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange), used
+     * to decide whether to notify connected Inputs after the FN function is
+     * evaluated.
+     * @tparam FN The function to evaluate. Must be able to operate on
+     * default-constructed INPUTS arguments, as it may be invoked before
+     * upstream dependencies pass on their values
+     * @tparam INPUTS The input policies for the parameters of the FN fuction.
+     * You can get the input type of the parameter using INPUTS::type.
+     */
+    template <template <typename> class PROPAGATE, typename FN, class... INPUTS>
+    class Node final
+        : public Work,
+          public Connectable<
+              std::result_of_t<FN(typename INPUTS::output_type...)>> {
       public:
+        using RET =
+            typename std::result_of_t<FN(typename INPUTS::output_type...)>;
+
+        /**
+         * @brief Get an Input object associated with the N'th argument of this
+         * Node's function FN
+         * @details Pass this object to a Connectable object so this Node is
+         * evaluated whenever that Connectable changes, or set values on the
+         * Input (i.e. pass values to the FN function) directly using
+         * Input.append().
+         *
+         * @tparam N which function argument to get
+         */
+        template <std::size_t N>
+        auto input() -> Input<std::tuple_element_t<
+            N, std::tuple<typename INPUTS::input_type...>>> {
+            return Input<std::tuple_element_t<
+                N, std::tuple<typename INPUTS::input_type...>>>(
+                std::get<N>(inputs), boost::intrusive_ptr<Work>(this));
+        }
+
+        /**
+         * @brief Return a Tuple of all the Inputs to this function.
+         * @details Equivalent to calling input() for the N arguments of the FN
+         * function
+         */
+        std::tuple<Input<typename INPUTS::input_type>...> inputtuple() {
+            return inputtuple_fn(std::index_sequence_for<INPUTS...>{});
+        }
+
         /**
          * @brief Connect an Input to the output of this Node's FN function
          * @details Newly-calculated values will be fed to the Input according
@@ -589,8 +700,7 @@ namespace calcgraph {
             // be unnecessary. See the OnChange propagation policy to mitagate
             // this (your function should be idempotent!).
 
-            // calculate ourselves
-            RET val = do_eval();
+            RET val = call_fn(std::index_sequence_for<INPUTS...>{});
 
             if (propagate(val)) {
                 for (auto dependent = this->dependents.begin();
@@ -635,128 +745,10 @@ namespace calcgraph {
          */
         PROPAGATE<RET> propagate;
 
-      protected:
-        MultiConnectable(uint32_t id) : Work(id) {}
-
-        virtual RET do_eval() = 0;
-    };
-
-    template <typename RET>
-    class Accumulator final
-        : public MultiConnectable<Always,
-                                  std::shared_ptr<std::forward_list<RET>>>,
-          private Storeable<RET> {
-
-      public:
-        /**
-         * @brief Returns the Input to the accumulator
-         * @details This can be connected to multiple Connectables, or multiple
-         * returned Inputs can be connected - in both cases all appended objects
-         * will be accumulated in the returned std::vectors.
-         */
-        Input<RET> input() {
-            return Input<RET>(*this, boost::intrusive_ptr<Work>(this));
-        }
-
-        void store(RET val) override {
-            Element *e = new Element(val);
-            while (true) {
-                Element *snap = head.load(std::memory_order_acquire);
-                e->next.store(snap, std::memory_order_release);
-                if (head.compare_exchange_weak(snap, e))
-                    return;
-            }
-        }
-
-      protected:
-        std::shared_ptr<std::forward_list<RET>> do_eval() override {
-            auto ret = std::shared_ptr<std::forward_list<RET>>(
-                new std::forward_list<RET>());
-
-            Element *e = head.exchange(nullptr, std::memory_order_acq_rel);
-            while (e != nullptr) {
-                ret->push_front(e->val);
-                Element *next = e->next.load(std::memory_order_consume);
-                delete e;
-                e = next;
-            }
-
-            return ret;
-        }
-
-      private:
-        Accumulator(uint32_t id)
-            : MultiConnectable<Always, std::shared_ptr<std::forward_list<RET>>>(
-                  id),
-              head() {}
-        friend class Graph;
-
-        struct Element final {
-            std::atomic<Element *> next;
-            RET val;
-            Element(RET val) : next(), val(val) {}
-        };
-
-        std::atomic<Element *> head;
-    };
-
-    /**
-     * @brief A Work item that evaluates a function, and propages the results to
-     * any connected Inputs.
-     * @details The key part of the calculation graph - constructed using a
-     * NodeBuilder obtained from Graph.node().
-     *
-     * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange), used
-     * to decide whether to notify connected Inputs after the FN function is
-     * evaluated.
-     * @tparam FN The function to evaluate. Must be able to operate on
-     * default-constructed INPUTS arguments, as it may be invoked before
-     * upstream dependencies pass on their values
-     * @tparam INPUTS The types of the parameters of the FN fuction.
-     */
-    template <template <typename> class PROPAGATE, typename FN,
-              typename... INPUTS>
-    class Node final
-        : public MultiConnectable<PROPAGATE, std::result_of_t<FN(INPUTS...)>> {
-      public:
-        using RET = typename std::result_of_t<FN(INPUTS...)>;
-
-        /**
-         * @brief Get an Input object associated with the N'th argument of this
-         * Node's function FN
-         * @details Pass this object to a Connectable object so this Node is
-         * evaluated whenever that Connectable changes, or set values on the
-         * Input (i.e. pass values to the FN function) directly using
-         * Input.append().
-         *
-         * @tparam N which function argument to get
-         */
-        template <std::size_t N>
-        auto input() -> Input<std::tuple_element_t<N, std::tuple<INPUTS...>>> {
-            return Input<std::tuple_element_t<N, std::tuple<INPUTS...>>>(
-                std::get<N>(inputs), boost::intrusive_ptr<Work>(this));
-        }
-
-        /**
-         * @brief Return a Tuple of all the Inputs to this function.
-         * @details Equivalent to calling input() for the N arguments of the FN
-         * function
-         */
-        std::tuple<Input<INPUTS>...> inputtuple() {
-            return inputtuple_fn(std::index_sequence_for<INPUTS...>{});
-        }
-
-      protected:
-        RET do_eval() override {
-            return call_fn(std::index_sequence_for<INPUTS...>{});
-        }
-
-      private:
         const FN fn;
-        std::tuple<Value<INPUTS>...> inputs;
+        std::tuple<INPUTS...> inputs;
 
-        Node(uint32_t id, const FN fn)
-            : MultiConnectable<PROPAGATE, RET>(id), fn(fn) {}
+        Node(uint32_t id, const FN fn) : Work(id), fn(fn) {}
         friend class Graph;
 
         template <std::size_t... I>
@@ -765,10 +757,11 @@ namespace calcgraph {
         }
         template <std::size_t... I>
         inline auto inputtuple_fn(std::index_sequence<I...>) {
-            return std::make_tuple<Input<INPUTS>...>(input<I>()...);
+            return std::make_tuple<Input<typename INPUTS::input_type>...>(
+                input<I>()...);
         }
 
-        template <template <typename> class>
+        template <template <typename> class, class...>
         friend class NodeBuilder;
     };
 
@@ -777,7 +770,7 @@ namespace calcgraph {
      * @details Can be reused to create multiple Nodes
      * @tparam PROPAGATE the propagation policy used by the Nodes it constructs
      */
-    template <template <typename> class PROPAGATE>
+    template <template <typename> class PROPAGATE, class... INPUTS>
     class NodeBuilder final {
       public:
         /**
@@ -787,37 +780,54 @@ namespace calcgraph {
          * @return A new NodeBuilder object
          */
         template <template <typename> class NEWPROPAGATE>
-        NodeBuilder<NEWPROPAGATE> propagate() {
-            return NodeBuilder<NEWPROPAGATE>(g);
+        auto propagate() {
+            return NodeBuilder<NEWPROPAGATE, INPUTS...>(g, connected);
+        }
+
+        template <typename VAL>
+        auto accumulate(Connectable<VAL> *arg) {
+            return doconnect<Accumulate, VAL>(arg);
+        }
+
+        template <typename VAL>
+        auto latest(Connectable<VAL> *arg) {
+            return doconnect<Latest, VAL>(arg);
         }
 
         /**
          * @brief Build a Node
          *
          * @param fn The function the node should execute. The newly-constructed
-         *node will be schedule for evaluation on the Graph, so this function
-         *should be able to accept default-constructed values of its Inputs (as
-         *it may be evaluated before upstream dependencies pass on values to it)
-         * @param args Connectable objects (including calcgraph::unconnected()
-         *objects) or appropriately-cast nullptrs to provide values for the
-         *calculation function. The Graph will recalcuate the Node when any one
-         *of these Connectable objects pass on a new value to the Node
-         *(coalescing where possible).
-         * @tparam INPUTS The types of the function's arguments
+         * node will be schedule for evaluation on the Graph, so this function
+         * should be able to accept default-constructed values of its Inputs (as
+         * it may be evaluated before upstream dependencies pass on values to
+         * it)
+         * @param args Any additional Connectable objects (including
+         * calcgraph::unconnected() objects) or appropriately-cast nullptrs to
+         * provide values for the calculation function. The Graph will
+         * recalcuate the Node when any one of these Connectable objects pass on
+         * a new value to the Node (coalescing where possible). This arguments
+         * are appended to those passed to this NodeBuilder via calls to
+         * accumulate or latest.
+         * @tparam VALS The types of the function's arguments, not the input
+         * policy.
          * @return A new Node
          */
-        template <typename FN, typename... INPUTS>
-        auto connect(const FN fn, Connectable<INPUTS> *... args) {
+        template <typename FN, typename... VALS>
+        auto connect(const FN fn, Connectable<VALS> *... args) {
 
             // first, make the node
-            auto node = boost::intrusive_ptr<Node<PROPAGATE, FN, INPUTS...>>(
-                new Node<PROPAGATE, FN, INPUTS...>(g.ids++, fn));
+            auto node = boost::intrusive_ptr<
+                Node<PROPAGATE, FN, INPUTS..., Latest<VALS>...>>(
+                new Node<PROPAGATE, FN, INPUTS..., Latest<VALS>...>(g.ids++,
+                                                                    fn));
 
             // next, connect any given inputs
-            g.connectall(
-                std::index_sequence_for<INPUTS...>{},
-                std::make_tuple<Connectable<INPUTS> *...>(std::move(args)...),
-                node->inputtuple());
+            auto newargs =
+                std::make_tuple<Connectable<VALS> *...>(std::move(args)...);
+            auto concatted = std::tuple_cat(connected, std::move(newargs));
+            g.connectall(std::index_sequence_for<INPUTS..., VALS...>{},
+                         concatted, node->inputtuple());
 
             // finally schedule it for evaluation
             node->schedule(g);
@@ -825,27 +835,30 @@ namespace calcgraph {
         }
 
       private:
+        using STORED =
+            std::tuple<Connectable<typename INPUTS::input_type> *...>;
+
         Graph &g;
-        NodeBuilder(Graph &g) : g(g) {}
+        STORED
+        connected;
+
+        NodeBuilder(Graph &g, STORED connected = STORED())
+            : g(g), connected(connected) {}
 
         friend class Graph;
-        template <template <typename> class>
+        template <template <typename> class, class...>
         friend class NodeBuilder;
+
+        template <template <class> class POLICY, typename VAL>
+        inline auto doconnect(Connectable<VAL> *arg) {
+            auto newarg = std::make_tuple<Connectable<VAL> *>(std::move(arg));
+            auto concatted = std::tuple_cat(connected, std::move(newarg));
+            return NodeBuilder<PROPAGATE, INPUTS..., POLICY<VAL>>(g, concatted);
+        }
     };
 
     // see comments in declaration
     NodeBuilder<Always> Graph::node() { return NodeBuilder<Always>(*this); }
-
-    // see comments in declaration
-    template <typename RET>
-    boost::intrusive_ptr<Accumulator<RET>>
-    Graph::accumulator(Connectable<RET> *arg) {
-        auto acc =
-            boost::intrusive_ptr<Accumulator<RET>>(new Accumulator<RET>(ids++));
-        calcgraph::connect(arg, acc->input());
-        acc->schedule(*this);
-        return acc;
-    }
 
     // see comments in declaration
     void WorkState::add_to_queue(Work &work) {

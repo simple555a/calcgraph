@@ -6,7 +6,7 @@ test: $(SOURCES) $(wildcard *.h)
 	$(CXX) $(CPPFLAGS) $(SOURCES) $(shell pkg-config --libs --cflags cppunit boost) -o test
 
 check: test
-	./test
+	time ./test
 
 clean:
 	rm -r test *.o latex *.dSYM 2>/dev/null || true
