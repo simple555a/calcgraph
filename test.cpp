@@ -13,6 +13,9 @@ class GraphTest final : public CppUnit::TestFixture {
     const std::function<intlist(intlist)> intlist_identity =
         [](intlist a) { return a; };
 
+    /**
+     * @brief using NodeBuilder.connect to pass args
+     */
     void testSingleNode() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
@@ -22,6 +25,41 @@ class GraphTest final : public CppUnit::TestFixture {
         auto node =
             g.node().connect(std::plus<int>(), calcgraph::unconnected<int>(),
                              calcgraph::unconnected<int>());
+        node->input<0>().append(g, 1);
+        node->input<1>().append(g, 2);
+        node->connect(calcgraph::Input<int>(res));
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 3);
+
+        // check an empty run
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
+
+        // update an input
+        node->input<0>().append(g, 3);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 5);
+    }
+
+    /**
+     * @brief using NodeBuilder.latest to pass args
+     */
+    void testSingleNodeExplicit() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Latest<int> res;
+
+        // setup
+        auto node = g.node()
+                        .latest(calcgraph::unconnected<int>())
+                        .latest(calcgraph::unconnected<int>())
+                        .connect(std::plus<int>());
         node->input<0>().append(g, 1);
         node->input<1>().append(g, 2);
         node->connect(calcgraph::Input<int>(res));
@@ -354,6 +392,7 @@ class GraphTest final : public CppUnit::TestFixture {
 
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testSingleNode);
+    CPPUNIT_TEST(testSingleNodeExplicit);
     CPPUNIT_TEST(testConstant);
     CPPUNIT_TEST(testChain);
     CPPUNIT_TEST(testUpdatePolicy);
