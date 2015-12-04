@@ -359,15 +359,14 @@ class GraphTest final : public CppUnit::TestFixture {
     void testAccumulator() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Latest<std::shared_ptr<std::forward_list<int>>> res;
+        calcgraph::Latest<intlist> res;
 
         // setup
         auto acc = g.node()
                        .accumulate(calcgraph::unconnected<int>())
                        .connect(intlist_identity);
         acc->input<0>().append(g, 3);
-        acc->connect(
-            calcgraph::Input<std::shared_ptr<std::forward_list<int>>>(res));
+        acc->connect(calcgraph::Input<intlist>(res));
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);

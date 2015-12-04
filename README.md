@@ -8,7 +8,7 @@ A lightweight C++14 header-only framework for organising application logic to mi
 
 ## Dependencies
 
-CalcGraph uses boost intrusive_ptr, a header-only smart pointer library.
+CalcGraph uses boost intrusive_ptr, a header-only smart pointer library. The tests use [cppunit](http://sourceforge.net/projects/cppunit).
 
 ## Contributing
 
