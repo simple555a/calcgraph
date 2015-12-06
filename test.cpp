@@ -197,28 +197,36 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
     }
 
-    void testUpdatePolicy() {
+    void testPropagationPolicies() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
-        calcgraph::Latest<int> always_res, onchange_res;
+        calcgraph::Latest<int> always_res, onchange_res, weak_res;
 
         // setup
         auto in = g.node().connect(int_identity, calcgraph::unconnected<int>());
+
         auto always = g.node().propagate<calcgraph::Always>().connect(
             int_identity, in.get());
         auto afteralways = g.node().connect(int_identity, always.get());
         afteralways->connect(calcgraph::Input<int>(always_res));
+
         auto onchange = g.node().propagate<calcgraph::OnChange>().connect(
             int_identity, in.get());
         auto afteronchange = g.node().connect(int_identity, onchange.get());
         afteronchange->connect(calcgraph::Input<int>(onchange_res));
 
+        auto weak = g.node().propagate<calcgraph::Weak>().connect(int_identity,
+                                                                  in.get());
+        auto afterweak = g.node().connect(int_identity, weak.get());
+        afterweak->connect(calcgraph::Input<int>(weak_res));
+
         in->input<0>().append(g, 1);
         g(&stats);
-        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 5);
-        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 5);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 7);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 7);
         CPPUNIT_ASSERT(always_res.read() == 1);
         CPPUNIT_ASSERT(onchange_res.read() == 1);
+        CPPUNIT_ASSERT(weak_res.read() == 1);
 
         // check an empty run
         g(&stats);
@@ -229,17 +237,21 @@ class GraphTest final : public CppUnit::TestFixture {
         in->input<0>().append(g, 1);
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
-        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 4); // *not* 5
+        CPPUNIT_ASSERT_MESSAGE(
+            stats, stats.worked ==
+                       5); // *not* 7, afterweak & afteronchange not calculated
         CPPUNIT_ASSERT(always_res.read() == 1);
         CPPUNIT_ASSERT(onchange_res.read() == 1);
+        CPPUNIT_ASSERT(weak_res.read() == 1);
 
         // a new input
         in->input<0>().append(g, 2);
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
-        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 5);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 6);
         CPPUNIT_ASSERT(always_res.read() == 2);
         CPPUNIT_ASSERT(onchange_res.read() == 2);
+        CPPUNIT_ASSERT(weak_res.read() == 1); // afterweak not calculated
     }
 
     void testSharedPointer() {
@@ -394,7 +406,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testSingleNodeExplicit);
     CPPUNIT_TEST(testConstant);
     CPPUNIT_TEST(testChain);
-    CPPUNIT_TEST(testUpdatePolicy);
+    CPPUNIT_TEST(testPropagationPolicies);
     CPPUNIT_TEST(testSharedPointer);
     CPPUNIT_TEST(testDisconnect);
     CPPUNIT_TEST(testThreaded);

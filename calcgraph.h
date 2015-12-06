@@ -190,8 +190,21 @@ namespace calcgraph {
      * applies to
      */
     template <typename RET>
-    struct Always {
-        inline constexpr bool operator()(RET) { return true; }
+    struct Always final {
+        inline constexpr bool push_value(RET) { return true; }
+        inline constexpr bool notify() { return true; }
+    };
+
+    /**
+     * @brief A propagation policy that never recalculates downstream
+     * dependencies
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Never final {
+        inline constexpr bool push_value(RET) { return false; }
+        inline constexpr bool notify() { return true; }
     };
 
     /**
@@ -206,13 +219,46 @@ namespace calcgraph {
      * applies to
      */
     template <typename RET>
-    struct OnChange {
-        inline bool operator()(RET latest) {
+    struct OnChange final {
+        inline constexpr bool notify() { return true; }
+        inline bool push_value(RET latest) {
             return last.exchange(latest) != latest;
         }
 
       private:
         Latest<RET> last;
+    };
+
+    /**
+     * @brief A specialization of OnChange for std::shared_ptrs that compares
+     * what the pointers point at
+     */
+    template <typename RET>
+    struct OnChange<std::shared_ptr<RET>> final {
+        inline constexpr bool notify() { return true; }
+        inline bool push_value(std::shared_ptr<RET> latest) {
+            auto previous = last.exchange(latest);
+            if (latest && previous)
+                return *latest == *previous;
+            else
+                return latest == previous;
+        }
+
+      private:
+        Latest<std::shared_ptr<RET>> last;
+    };
+
+    /**
+     * @brief A propagation policy that passes on values but doesn't schedule
+     * downstream Work items to be calculated
+     * @details Useful for circular references
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Weak final {
+        inline constexpr bool notify() { return false; }
+        inline constexpr bool push_value(RET latest) { return true; }
     };
 
     /**
@@ -702,13 +748,13 @@ namespace calcgraph {
 
             RET val = call_fn(std::index_sequence_for<INPUTS...>{});
 
-            if (propagate(val)) {
+            if (propagate.push_value(val)) {
                 for (auto dependent = this->dependents.begin();
                      dependent != this->dependents.end(); dependent++) {
 
                     // pass on the new value & schedule the dowstream work
                     dependent->in->store(val);
-                    if (dependent->ref) {
+                    if (propagate.notify() && dependent->ref) {
                         ws.add_to_queue(*dependent->ref);
                     }
                 }
