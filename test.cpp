@@ -7,11 +7,14 @@
 
 class GraphTest final : public CppUnit::TestFixture {
     using intlist = std::shared_ptr<std::forward_list<int>>;
+    using intvector = std::shared_ptr<std::vector<int>>;
 
   public:
     const std::function<int(int)> int_identity = [](int a) { return a; };
     const std::function<intlist(intlist)> intlist_identity =
         [](intlist a) { return a; };
+    const std::function<intvector(intvector)> intvector_identity =
+        [](intvector a) { return a; };
 
     /**
      * @brief using NodeBuilder.connect to pass args
@@ -258,19 +261,15 @@ class GraphTest final : public CppUnit::TestFixture {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
         calcgraph::Latest<std::size_t> res;
-        calcgraph::Constant<std::shared_ptr<std::vector<int>>> it(
-            std::shared_ptr<std::vector<int>>(new std::vector<int>()));
+        calcgraph::Constant<intvector> it(intvector(new std::vector<int>()));
 
         // setup
-        auto adder =
-            g.node().connect([](std::shared_ptr<std::vector<int>> arr, int v) {
-                arr->push_back(v);
-                return arr;
-            }, &it, calcgraph::unconnected<int>());
-        auto sizer =
-            g.node().connect([](std::shared_ptr<std::vector<int>> arr) {
-                return arr->size();
-            }, adder.get());
+        auto adder = g.node().connect([](intvector arr, int v) {
+            arr->push_back(v);
+            return arr;
+        }, &it, calcgraph::unconnected<int>());
+        auto sizer = g.node().connect([](intvector arr) { return arr->size(); },
+                                      adder.get());
         sizer->connect(calcgraph::Input<std::size_t>(res));
 
         adder->input<1>().append(g, 1);
@@ -358,16 +357,6 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT(res.read() == 3);
     }
 
-    template <typename RET>
-    inline std::shared_ptr<std::vector<RET>>
-    vector(std::initializer_list<RET> elements) {
-        auto ret = std::shared_ptr<std::vector<RET>>(new std::vector<RET>());
-        for (auto elem : elements) {
-            ret->push_back(elem);
-        }
-        return ret;
-    }
-
     void testAccumulator() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
@@ -383,7 +372,7 @@ class GraphTest final : public CppUnit::TestFixture {
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
-        auto expected = vector({3});
+        auto expected = intvector(new std::vector<int>({3}));
         CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
                                   res.read()->begin(), res.read()->end()));
 
@@ -396,7 +385,50 @@ class GraphTest final : public CppUnit::TestFixture {
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
-        expected = vector({5, 6});
+        expected = intvector(new std::vector<int>({5, 6}));
+        CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
+                                  res.read()->begin(), res.read()->end()));
+    }
+
+    void testVariadic() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Latest<intvector> res;
+
+        // setup
+        auto var = g.node().variadic<int>().connect(intvector_identity);
+        auto one = var->variadic_add<0>();
+        auto two = var->variadic_add<0>();
+        var->connect(calcgraph::Input<intvector>(res));
+
+        one.append(g, 5);
+        two.append(g, 7);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        auto expected = intvector(new std::vector<int>({5, 7}));
+        CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
+                                  res.read()->begin(), res.read()->end()));
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
+
+        one.append(g, 2);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        expected = intvector(new std::vector<int>({2, 7}));
+        CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
+                                  res.read()->begin(), res.read()->end()));
+
+        var->variadic_remove<0>(one);
+
+        two.append(g, 4);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        expected = intvector(new std::vector<int>({4}));
         CPPUNIT_ASSERT(std::equal(expected->begin(), expected->end(),
                                   res.read()->begin(), res.read()->end()));
     }
@@ -411,6 +443,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testDisconnect);
     CPPUNIT_TEST(testThreaded);
     CPPUNIT_TEST(testAccumulator);
+    CPPUNIT_TEST(testVariadic);
     CPPUNIT_TEST_SUITE_END();
 };
 

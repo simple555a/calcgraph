@@ -83,8 +83,7 @@ namespace calcgraph {
         }
 
         Latest() noexcept : val() {}
-        Latest(const Latest &other) noexcept : val(other.val) {}
-        Latest(Latest &&other) noexcept : val(std::move(other.val)) {}
+        Latest(const Latest &other) = delete;
 
       private:
         std::atomic<VAL> val;
@@ -113,8 +112,7 @@ namespace calcgraph {
         }
 
         Latest() noexcept : val() {}
-        Latest(const Latest &other) noexcept : val(other.val) {}
-        Latest(Latest &&other) noexcept : val(std::move(other.val)) {}
+        Latest(const Latest &other) = delete;
 
       private:
         std::shared_ptr<VAL> val;
@@ -170,8 +168,7 @@ namespace calcgraph {
         }
 
         Accumulate() noexcept : head() {}
-        Accumulate(const Accumulate &other) noexcept : head(other.head) {}
-        Accumulate(Accumulate &&other) noexcept : head(std::move(other.head)) {}
+        Accumulate(const Accumulate &other) = delete;
 
       private:
         struct Element final {
@@ -181,6 +178,84 @@ namespace calcgraph {
         };
 
         std::atomic<Element *> head;
+    };
+
+    /**
+     * @brief An input policy that converts many inputs into a std::vector of
+     * values
+     * @details [long description]
+     *
+     * @tparam VAL The type of the value stored - must be be atomic
+     */
+    template <typename VAL>
+    class Variadic final : public Storeable<std::nullptr_t> {
+      public:
+        using input_type = std::nullptr_t;
+        using output_type = std::shared_ptr<std::vector<VAL>>;
+        using element_type = VAL;
+
+        /**
+         * @brief Should not be called directly, instead use new_input to get an
+         * Input to append values to
+         */
+        inline void store(input_type val) override { std::abort(); }
+
+        /**
+         * @brief Used by the Node to extract the current list of latest values
+         * from the inputs.
+         * @details Called by Node when the lock is held, so accesses the inputs
+         * vector in a thread-safe manner.
+         * @returns A non-null (but possibly empty) std::vector, with one value
+         * for each input created by new_input().
+         */
+        inline output_type read() {
+            auto out = output_type(new std::vector<VAL>());
+            for (auto i = inputs.begin(); i != inputs.end(); ++i) {
+                out->push_back(i->read());
+            }
+            return out;
+        }
+
+        Variadic() noexcept : inputs() {}
+        Variadic(const Variadic &other) = delete;
+
+      private:
+        /**
+         * @brief The Inputs, guarded by the containing Node's lock
+         * @details A std::forward_list, not a std::vector as we can't move the
+         * Latest objects (as std:atomics aren't copy-constructible), so we
+         * can't resize a vector.
+         */
+        std::forward_list<Latest<VAL>> inputs;
+
+        /**
+         * @brief Creates a new input for the output vector and returns it.
+         * @details Always created at the end. Only call when the containing
+         * Node's lock is held.
+         */
+        inline Latest<VAL> &add_input() {
+            auto before_end = inputs.before_begin();
+            for (auto &_ : inputs)
+                ++before_end;
+            inputs.emplace_after(before_end);
+            ++before_end; // point to the new element
+            return *before_end;
+        }
+
+        /**
+         * @brief Removes an input created by add_input from the list
+         * @details Only call when the containing Node's lock is held.
+         */
+        inline void remove_input(Storeable<VAL> *it) {
+            // Latest objects don't have equality methods, so just check if the
+            // pointers match.
+            inputs.remove_if([it](const Latest<VAL> &val) {
+                return std::addressof(val) == it;
+            });
+        }
+
+        template <template <typename> class, typename, typename...>
+        friend class Node;
     };
 
     /**
@@ -437,6 +512,16 @@ namespace calcgraph {
         }
 
         /**
+         * @brief Spins until the Work's exclusive lock is acquired
+         * @details Not re-entrant
+         */
+        void spinlock() {
+            while (!trylock()) {
+                std::this_thread::yield();
+            }
+        }
+
+        /**
          * @brief Release the Work's exclusive lock
          * @details ...by setting the LSB of the next pointer to zero. Only call
          * if you already hold the lock, or the results are undefined.
@@ -663,7 +748,10 @@ namespace calcgraph {
      *
      * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange), used
      * to decide whether to notify connected Inputs after the FN function is
-     * evaluated.
+     * evaluated. An instance of the policy must have a push_value method, to
+     * decide whether to even tell downstream nodes about the new value, and a
+     * notify method, to decide whether to schedule downstream nodes that we
+     * just pushed values to for re-evaluation.
      * @tparam FN The function to evaluate. Must be able to operate on
      * default-constructed INPUTS arguments, as it may be invoked before
      * upstream dependencies pass on their values
@@ -690,10 +778,11 @@ namespace calcgraph {
          * @tparam N which function argument to get
          */
         template <std::size_t N>
-        auto input() -> Input<std::tuple_element_t<
-            N, std::tuple<typename INPUTS::input_type...>>> {
-            return Input<std::tuple_element_t<
-                N, std::tuple<typename INPUTS::input_type...>>>(
+        Input<typename std::tuple_element_t<
+            N, typename std::tuple<INPUTS...>>::input_type>
+        input() {
+            return Input<typename std::tuple_element_t<
+                N, typename std::tuple<INPUTS...>>::input_type>(
                 std::get<N>(inputs), boost::intrusive_ptr<Work>(this));
         }
 
@@ -707,15 +796,60 @@ namespace calcgraph {
         }
 
         /**
+         * @brief Add a new Input to the (variadic) the N'th argument of this
+         * Node's function FN
+         * @details Pass this object to a Connectable object so this Node is
+         * evaluated whenever that Connectable changes, or set values on the
+         * Input (i.e. pass values to the FN function) directly using
+         * Input.append(). Note that this method won't schedule the node for
+         * evaluation, so if you want the expanded vector to be processed you
+         * should schedule the Node directly.
+         *
+         * @tparam N which function argument to get; it must have a Variadic
+         * input policy
+         */
+        template <std::size_t N>
+        Input<typename std::tuple_element_t<
+            N, typename std::tuple<INPUTS...>>::element_type>
+        variadic_add() {
+            spinlock();
+            auto ret = Input<typename std::tuple_element_t<
+                N, typename std::tuple<INPUTS...>>::element_type>(
+                std::get<N>(inputs).add_input(),
+                boost::intrusive_ptr<Work>(this));
+            release();
+            return ret;
+        }
+
+        /**
+         * @brief Add a new Input to the (variadic) the N'th argument of this
+         * Node's function FN
+         * @details Pass this object to a Connectable object so this Node is
+         * evaluated whenever that Connectable changes, or set values on the
+         * Input (i.e. pass values to the FN function) directly using
+         * Input.append(). Note that this method won't schedule the node for
+         * evaluation, so if you want the reduced vector to be processed you
+         * should schedule the Node directly. The Input must not be used after
+         * passed to this method.
+         *
+         * @tparam N which function argument to get; it must have a Variadic
+         * input policy
+         */
+        template <std::size_t N>
+        void variadic_remove(Input<typename std::tuple_element_t<
+            N, typename std::tuple<INPUTS...>>::element_type> &input) {
+            spinlock();
+            std::get<N>(inputs).remove_input(input.in);
+            release();
+        }
+
+        /**
          * @brief Connect an Input to the output of this Node's FN function
          * @details Newly-calculated values will be fed to the Input according
          * to this Node's PROPAGATE propagation policy
          */
         void connect(Input<RET> a) override {
-            // spinlock until we can add this
-            while (!trylock()) {
-                std::this_thread::yield();
-            }
+            spinlock();
             dependents.push_front(a);
             release();
         }
@@ -855,6 +989,14 @@ namespace calcgraph {
         }
 
         /**
+         * @brief Add an argument with a Variadic input policy
+         */
+        template <typename VAL>
+        auto variadic() {
+            return doconnect<Variadic, VAL>(unconnected<std::nullptr_t>());
+        }
+
+        /**
          * @brief Build a Node
          *
          * @param fn The function the node should execute. The newly-constructed
@@ -910,8 +1052,11 @@ namespace calcgraph {
         friend class NodeBuilder;
 
         template <template <class> class POLICY, typename VAL>
-        inline auto doconnect(Connectable<VAL> *arg) {
-            auto newarg = std::make_tuple<Connectable<VAL> *>(std::move(arg));
+        inline auto doconnect(
+            Connectable<typename POLICY<VAL>::input_type> *arg) {
+            auto newarg = std::make_tuple<
+                Connectable<typename POLICY<VAL>::input_type> *>(
+                std::move(arg));
             auto concatted = std::tuple_cat(connected, std::move(newarg));
             return NodeBuilder<PROPAGATE, INPUTS..., POLICY<VAL>>(g, concatted);
         }
