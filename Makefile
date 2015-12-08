@@ -1,5 +1,7 @@
 CPPFLAGS += -std=c++14 -ferror-limit=5 -g
 
+.PHONY: check format doc clean
+
 test: test.cpp calcgraph.h
 	$(CXX) $(CPPFLAGS) test.cpp $(shell pkg-config --libs --cflags cppunit boost) -o test
 

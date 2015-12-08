@@ -12,12 +12,11 @@
 
 #include "calcgraph.h"
 
+using uint8_vector = std::shared_ptr<std::vector<uint8_t>>;
 using double_vector = std::shared_ptr<std::vector<double>>;
 using price_input_map =
     std::unordered_map<std::uint8_t, calcgraph::Input<double>>;
 using price_input_map_ptr = std::shared_ptr<price_input_map>;
-using uint8_set = std::set<uint8_t>;
-using uint8_set_ptr = std::shared_ptr<uint8_set>;
 using string = std::shared_ptr<std::string>;
 using strings = std::shared_ptr<std::forward_list<string>>;
 
@@ -41,8 +40,11 @@ static std::atomic<bool> stop(false);
  */
 static const int buffer_len = 4096;
 
-static calcgraph::Constant<uint8_set_ptr>
-    BENCHMARKS(uint8_set_ptr(new uint8_set({1, 3, 5, 10})));
+/**
+ * The "benchmark" maturities, or instruments we'll consider when building (via
+ * polyfit) the yield curve.
+ */
+static std::set<uint8_t> BENCHMARKS = {1, 3, 5, 10};
 
 static calcgraph::Graph g;
 
@@ -58,7 +60,7 @@ enum TradeSignal { BUY, SELL, HOLD };
  * @brief Polynomial curve fitting on 2D data
  * @see http://rosettacode.org/wiki/Polynomial_regression#C
  */
-double_vector polyfit(const double_vector dx, const double_vector dy) {
+double_vector polyfit(const uint8_vector dx, const double_vector dy) {
     double chisq;
     auto X = gsl_matrix_alloc(dx->size(), DEGREE);
     auto y = gsl_vector_alloc(dx->size());
@@ -88,12 +90,17 @@ double_vector polyfit(const double_vector dx, const double_vector dy) {
     return out;
 }
 
-calcgraph::Input<double> build_pipeline(uint8_t ticker) {
+using curve_fitter_node = boost::intrusive_ptr<calcgraph::Node<
+    calcgraph::OnChange, double_vector (*)(uint8_vector, double_vector),
+    calcgraph::Variadic<uint8_t>, calcgraph::Variadic<double>>>;
+
+calcgraph::Input<double> build_pipeline(uint8_t ticker,
+                                        curve_fitter_node curve_fitter) {
     auto signal_generator =
         g.node()
             .propagate<calcgraph::OnChange>()
             .latest(calcgraph::unconnected<double>())
-            .latest(calcgraph::unconnected<double_vector>())
+            .latest(curve_fitter.get())
             .connect([ticker](double price,
                               double_vector yield_curve) -> TradeSignal {
                 if (!yield_curve || !price) {
@@ -119,16 +126,24 @@ calcgraph::Input<double> build_pipeline(uint8_t ticker) {
                     return HOLD;
             });
 
-    return signal_generator->input<0>();
+    if (BENCHMARKS.find(ticker) != BENCHMARKS.end()) {
+        // this is a benchmark, so wire it up to the curve fitter
+        return signal_generator->input<0>();
+    } else {
+        return signal_generator->input<0>();
+    }
 }
 
 price_input_map_ptr dispatch(strings msgs, price_input_map_ptr map,
-                             uint8_set_ptr benchmarks) {
+                             curve_fitter_node curve_fitter) {
     if (!map) {
         map = price_input_map_ptr(new price_input_map());
     }
+    if (!curve_fitter) {
+        return map;
+    }
 
-    std::for_each(msgs->begin(), msgs->end(), [map](string &msg) {
+    std::for_each(msgs->begin(), msgs->end(), [map, curve_fitter](string &msg) {
         // parse the message
         uint8_t ticker = std::stoi(*msg);
         double price = std::stod(msg->substr(msg->find(" ") + 1));
@@ -136,7 +151,8 @@ price_input_map_ptr dispatch(strings msgs, price_input_map_ptr map,
         // pass it to the right output
         auto input = map->find(ticker);
         if (input == map->end()) {
-            input = map->insert({ticker, build_pipeline(ticker)}).first;
+            input = map->insert({ticker, build_pipeline(ticker, curve_fitter)})
+                        .first;
         }
         input->second.append(g, price);
     });
@@ -209,11 +225,18 @@ int main() {
 
     std::thread t(calcgraph::evaluate_repeatedly, std::ref(g), std::ref(stop));
 
+    calcgraph::Constant<curve_fitter_node> curve_fitter =
+        g.node()
+            .propagate<calcgraph::OnChange>()
+            .variadic<uint8_t>()
+            .variadic<double>()
+            .connect(polyfit);
+
     auto dispatcher = g.node()
                           .propagate<calcgraph::Weak>()
                           .accumulate(calcgraph::unconnected<string>())
                           .latest(calcgraph::unconnected<price_input_map_ptr>())
-                          .latest(&BENCHMARKS)
+                          .latest(&curve_fitter)
                           .connect(dispatch);
     dispatcher->connect(dispatcher->input<1>());
 

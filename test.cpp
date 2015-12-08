@@ -16,6 +16,13 @@ class GraphTest final : public CppUnit::TestFixture {
     const std::function<intvector(intvector)> intvector_identity =
         [](intvector a) { return a; };
 
+    void testAsserts() {
+        static_assert(std::is_move_constructible<calcgraph::Input<int>>::value,
+                      "not move constructible");
+        static_assert(std::is_move_assignable<calcgraph::Input<int>>::value,
+                      "not move assignable");
+    }
+
     /**
      * @brief using NodeBuilder.connect to pass args
      */
@@ -434,6 +441,7 @@ class GraphTest final : public CppUnit::TestFixture {
     }
 
     CPPUNIT_TEST_SUITE(GraphTest);
+    CPPUNIT_TEST(testAsserts);
     CPPUNIT_TEST(testSingleNode);
     CPPUNIT_TEST(testSingleNodeExplicit);
     CPPUNIT_TEST(testConstant);

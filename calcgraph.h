@@ -119,6 +119,42 @@ namespace calcgraph {
     };
 
     /**
+     * @brief A partial specialization of Latest for boost::intrusive_ptr
+     * @tparam VAL the type of the value the boost::intrusive_ptr points to
+     */
+    template <typename VAL>
+    class Latest<boost::intrusive_ptr<VAL>> final
+        : public Storeable<boost::intrusive_ptr<VAL>> {
+      public:
+        using input_type = boost::intrusive_ptr<VAL>;
+        using output_type = boost::intrusive_ptr<VAL>;
+
+        inline void store(input_type v) override {
+            val.store(v.detach(), std::memory_order_release);
+        }
+
+        /**
+         * @brief Coverts the stored raw pointer back to an intrusive one,
+         * without altering the reference count
+         */
+        inline output_type read() {
+            return boost::intrusive_ptr<VAL>(
+                val.load(std::memory_order_consume), false);
+        }
+
+        inline input_type exchange(input_type other) {
+            return boost::intrusive_ptr<VAL>(
+                val.exchange(other.detach(), std::memory_order_acq_rel), false);
+        }
+
+        Latest() noexcept : val() {}
+        Latest(const Latest &other) = delete;
+
+      private:
+        std::atomic<VAL *> val;
+    };
+
+    /**
      * @brief An Input policy that accumulates any values fed to it and returns
      * them all to its containing Node as a std::forward_list
      * @details Useful if you can't afford to drop any values from upstream
@@ -416,9 +452,6 @@ namespace calcgraph {
             to->connect(from);
     }
 
-    inline void intrusive_ptr_add_ref(Work *);
-    inline void intrusive_ptr_release(Work *);
-
     namespace flags {
         /**
          * @brief The lock bit in a Work's next pointer.
@@ -462,8 +495,12 @@ namespace calcgraph {
       private:
         // for boost's intrinsic_ptr
         std::atomic_uint_fast16_t refcount;
-        friend void intrusive_ptr_add_ref(Work *);
-        friend void intrusive_ptr_release(Work *);
+        friend inline void intrusive_ptr_add_ref(Work *w) { ++w->refcount; }
+        friend inline void intrusive_ptr_release(Work *w) {
+            if (--w->refcount == 0u) {
+                delete w;
+            }
+        }
 
         /**
          * @page worklocking Locking a Work object
@@ -530,14 +567,6 @@ namespace calcgraph {
             next.fetch_and(~flags::LOCK, std::memory_order_release);
         }
     };
-
-    inline void intrusive_ptr_add_ref(Work *w) { ++w->refcount; }
-
-    inline void intrusive_ptr_release(Work *w) {
-        if (--w->refcount == 0u) {
-            delete w;
-        }
-    }
 
     /**
      * @brief Statistics for a single evaluation of the calculation graph.
@@ -677,6 +706,16 @@ namespace calcgraph {
         Input(const Input &other) noexcept : in(other.in), ref(other.ref) {}
         Input(Input &&other) noexcept : in(std::move(other.in)),
                                         ref(std::move(other.ref)) {}
+        Input &operator=(const Input &other) noexcept {
+            in = other.in;
+            ref = other.ref;
+            return *this;
+        }
+        Input &operator=(Input &&other) noexcept {
+            in = std::move(other.in);
+            ref = std::move(other.ref);
+            return *this;
+        }
 
         /**
          * @brief Equality semantics, based on what it's an Input to, but not
@@ -850,7 +889,7 @@ namespace calcgraph {
          */
         void connect(Input<RET> a) override {
             spinlock();
-            dependents.push_front(a);
+            dependents.push_back(a);
             release();
         }
 
@@ -903,11 +942,15 @@ namespace calcgraph {
          * first place.
          */
         void disconnect(Input<RET> a) override {
-            // spinlock until we can add this
-            while (!trylock()) {
-                std::this_thread::yield();
+            spinlock();
+
+            auto it = std::find(dependents.begin(), dependents.end(), a);
+            if (it != dependents.end()) {
+                // slightly less shuffling
+                std::swap(*it, dependents.back());
+                dependents.pop_back();
             }
-            dependents.remove(a);
+
             release();
         }
 
@@ -917,7 +960,7 @@ namespace calcgraph {
          * @details Not threadsafe so controlled by the Work.next LSB locking
          * mechanism
          */
-        std::forward_list<Input<RET>> dependents;
+        std::vector<Input<RET>> dependents;
 
         /**
          * @brief The policy on when to propagate newly-calcuated values to
