@@ -502,6 +502,36 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT(two.read() == 9); // *not* 4
     }
 
+    void testMultiValued() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Latest<int> res;
+
+        // setup
+        auto node =
+            g.node()
+                .output<calcgraph::MultiValued<calcgraph::SingleList>::type>()
+                .latest(calcgraph::unconnected<intvector>())
+                .connect(intvector_identity);
+        node->connect(calcgraph::Input<int>(res));
+
+        node->input<0>().append(g, intvector(new std::vector<int>({3, 5, 7})));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 7);
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
+
+        node->input<0>().append(g, intvector(new std::vector<int>({4, 3, 2})));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(res.read() == 2);
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testAsserts);
     CPPUNIT_TEST(testSingleNode);
@@ -515,6 +545,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testAccumulator);
     CPPUNIT_TEST(testVariadic);
     CPPUNIT_TEST(testMultiplexed);
+    CPPUNIT_TEST(testMultiValued);
     CPPUNIT_TEST_SUITE_END();
 };
 

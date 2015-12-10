@@ -462,13 +462,13 @@ namespace calcgraph {
         }
 
         inline void propagate(RET &&val, WorkState &ws) {
-            if (propagation_policy.push_value(val)) {
+            if (!propagation_policy.push_value(val))
+                return;
 
-                for (auto &&dependent : dependents) {
-                    dependent.in->store(val);
-                    if (propagation_policy.notify() && dependent.ref) {
-                        ws.add_to_queue(*dependent.ref);
-                    }
+            for (auto &&dependent : dependents) {
+                dependent.in->store(val);
+                if (propagation_policy.notify() && dependent.ref) {
+                    ws.add_to_queue(*dependent.ref);
                 }
             }
         }
@@ -537,6 +537,38 @@ namespace calcgraph {
       private:
         std::unordered_map<key_type, SingleList<PROPAGATE, value_type>> keyed;
         SingleList<PROPAGATE, output_type> unkeyed;
+    };
+
+    template <template <template <typename> class, typename> class OUTPUT>
+    struct MultiValued final {
+        template <template <typename> class PROPAGATE, typename RET>
+        class type final
+            : public Connectable<typename OUTPUT<
+                  PROPAGATE,
+                  typename RET::element_type::value_type>::output_type> {
+
+          private:
+            using value_type = typename RET::element_type::value_type;
+
+          public:
+            using output_type =
+                typename OUTPUT<PROPAGATE, value_type>::output_type;
+
+            inline void connect(Input<output_type> a) { output.connect(a); }
+
+            inline void disconnect(Input<output_type> a) {
+                output.disconnect(a);
+            }
+
+            inline void propagate(RET &&val, WorkState &ws) {
+                for (auto i = val->begin(); i != val->end(); i++) {
+                    output.propagate(std::move(*i), ws);
+                }
+            }
+
+          private:
+            OUTPUT<PROPAGATE, value_type> output;
+        };
     };
 
     /**
@@ -1088,34 +1120,26 @@ namespace calcgraph {
          * propagate the result to any connected Inputs
          * @details Propagation is controlled by the PROPAGATE propagation
          * policy. This function exclusively locks the Node so only one
-         * thread
-         * can call this method at once. If a thread tries to call eval()
-         * when
-         * the Node is locked, it will instead put this Node back on the
+         * thread can call this method at once. If a thread tries to call eval()
+         * when the Node is locked, it will instead put this Node back on the
          * WorkState Graph's work_queue.
          */
         void eval(WorkState &ws) override {
             if (!this->trylock()) {
                 // another calculation in progress, so put us on the work
-                // queue
-                // (which will change the next pointer to the next node in
-                // the
-                // work queue, not this)
+                // queue (which will change the next pointer to the next node in
+                // the work queue, not this)
                 ws.add_to_queue(*this);
                 return;
             }
 
             // there's a race condition here: this Node can be put on the
-            // work
-            // queue, so if the inputs change we'll get rescheduled and
-            // re-ran.
-            // We only snap the atomic values in the next statement, so we
-            // could
-            // pick up newer values than the ones that triggered the
+            // work queue, so if the inputs change we'll get rescheduled and
+            // re-ran. We only snap the atomic values in the next statement, so
+            // we could pick up newer values than the ones that triggered the
             // recalculation of this Node, so the subsequent re-run would
             // be unnecessary. See the OnChange propagation policy to
-            // mitagate
-            // this (your function should be idempotent!).
+            // mitagate this (your function should be idempotent!).
 
             RET val = call_fn(std::index_sequence_for<INPUTS...>{});
             output.propagate(std::move(val), ws);
@@ -1154,13 +1178,11 @@ namespace calcgraph {
     /**
      * @brief A builder-pattern object for constructing Nodes
      * @details Can be reused to create multiple Nodes. Arguments can be
-     *passed
-     * either to successive calls to latest and accumulate (if you want to
+     * passed either to successive calls to latest and accumulate (if you want
+     *to
      * specify the input policy) or passed all at once to connect (if you
-     *just
-     * need the default input policy, Latest), or a mixture (in which case
-     *the
-     * parameters passed to connect come after those passed to latest and
+     * just need the default input policy, Latest), or a mixture (in which case
+     * the parameters passed to connect come after those passed to latest and
      * accumulate).
      *
      * @tparam PROPAGATE the propagation policy used by the Nodes it
@@ -1421,17 +1443,13 @@ namespace calcgraph {
     /**
      * @brief Repeatedly evaluate the Graph's work queue
      * @details Evaluate in a busy-loop, only yielding when there's no work
-     *to
-     * do. Doesn't block. This avoids having to pay the cost of
-     *mutex-related
+     * to do. Doesn't block. This avoids having to pay the cost of mutex-related
      * system calls if we slept on a mutex (and appending an Input would
-     *have to
-     * lock the same mutex when notifying this evalution thread).
+     * have to lock the same mutex when notifying this evalution thread).
      *
      * @param g The graph containing the work_queue to evaluate
      * @param stop When set, the thread will exit its busy-loop the next
-     *time it
-     * sees the work_queue empty
+     * time it sees the work_queue empty
      */
     void evaluate_repeatedly(Graph &g, std::atomic<bool> &stop) {
         while (!stop.load(std::memory_order_consume)) {
