@@ -8,6 +8,8 @@
 class GraphTest final : public CppUnit::TestFixture {
     using intlist = std::shared_ptr<std::forward_list<int>>;
     using intvector = std::shared_ptr<std::vector<int>>;
+    using intpair = std::pair<int, int>;
+    using p_intpair = std::shared_ptr<intpair>;
 
   public:
     const std::function<int(int)> int_identity = [](int a) { return a; };
@@ -440,6 +442,66 @@ class GraphTest final : public CppUnit::TestFixture {
                                   res.read()->begin(), res.read()->end()));
     }
 
+    void testMultiplexed() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Latest<p_intpair> res;
+
+        // setup
+        auto node = g.node()
+                        .output<calcgraph::Multiplexed>()
+                        .latest(calcgraph::unconnected<p_intpair>())
+                        .connect([](p_intpair a) { return *a; });
+        node->connect(calcgraph::Input<p_intpair>(res));
+
+        // test un-keyed inputs
+
+        node->input<0>().append(g, p_intpair(new intpair(5, 7)));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(*res.read() == intpair(5, 7));
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
+
+        node->input<0>().append(g, p_intpair(new intpair(3, 2)));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(*res.read() == intpair(3, 2));
+
+        // test keyed inputs
+        calcgraph::Latest<int> one, two;
+        node->connect_keyed(1, calcgraph::Input<int>(one));
+        node->connect_keyed(2, calcgraph::Input<int>(two));
+
+        node->input<0>().append(g, p_intpair(new intpair(1, 5)));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(one.read() == 5);
+
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 0);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 0);
+
+        node->input<0>().append(g, p_intpair(new intpair(2, 9)));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(two.read() == 9);
+
+        node->disconnect_keyed(2, calcgraph::Input<int>(two));
+
+        node->input<0>().append(g, p_intpair(new intpair(2, 4)));
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+        CPPUNIT_ASSERT(two.read() == 9); // *not* 4
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testAsserts);
     CPPUNIT_TEST(testSingleNode);
@@ -452,6 +514,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testThreaded);
     CPPUNIT_TEST(testAccumulator);
     CPPUNIT_TEST(testVariadic);
+    CPPUNIT_TEST(testMultiplexed);
     CPPUNIT_TEST_SUITE_END();
 };
 

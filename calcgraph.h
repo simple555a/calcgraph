@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <forward_list>
+#include <unordered_map>
 #include <memory>
 #include <queue>
 #include <thread>
@@ -19,13 +20,16 @@ namespace calcgraph {
     class Work;
     template <typename>
     class Input;
-    template <template <typename> class, typename, typename...>
+    template <template <typename> class,
+              template <template <typename> class, typename> class, typename,
+              typename...>
     class Node;
     template <typename>
     class Connectable;
     template <typename>
     class Constant;
-    template <template <typename> class, class...>
+    template <template <typename> class,
+              template <template <typename> class, typename> class, class...>
     class NodeBuilder;
 
     /**
@@ -120,6 +124,9 @@ namespace calcgraph {
 
     /**
      * @brief A partial specialization of Latest for boost::intrusive_ptr
+     * @details This class keeps one reference to any value stored here, even if
+     *the actual member type stored is a raw pointer.
+     *
      * @tparam VAL the type of the value the boost::intrusive_ptr points to
      */
     template <typename VAL>
@@ -129,9 +136,14 @@ namespace calcgraph {
         using input_type = boost::intrusive_ptr<VAL>;
         using output_type = boost::intrusive_ptr<VAL>;
 
-        inline void store(input_type v) override {
-            val.store(v.detach(), std::memory_order_release);
-        }
+        /**
+         * @brief Stores a new pointer
+         * @details Uses exchange to decrement the reference count (and possibly
+         * destroy) the value that was previously stored there when the returned
+         * intrusive_ptr is destroyed as it goes out of scope at the end of this
+         * function.
+         */
+        inline void store(input_type v) override { exchange(v); }
 
         /**
          * @brief Coverts the stored raw pointer back to an intrusive one,
@@ -290,86 +302,10 @@ namespace calcgraph {
             });
         }
 
-        template <template <typename> class, typename, typename...>
+        template <template <typename> class,
+                  template <template <typename> class, typename> class,
+                  typename, typename...>
         friend class Node;
-    };
-
-    /**
-     * @brief A propagation policy that always recalculates downstream
-     * dependencies
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct Always final {
-        inline constexpr bool push_value(RET) { return true; }
-        inline constexpr bool notify() { return true; }
-    };
-
-    /**
-     * @brief A propagation policy that never recalculates downstream
-     * dependencies
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct Never final {
-        inline constexpr bool push_value(RET) { return false; }
-        inline constexpr bool notify() { return true; }
-    };
-
-    /**
-     * @brief A propagation policy that recalculates downstream dependencies
-     * only if the Node's output changes (according to the != operator)
-     * @details This method isn't thread-safe, but doesn't need to be as it's
-     * only called by Node.eval() when the calculation lock is held. This policy
-     * stores the last output value in the Node, so increases the size of the
-     * templated Node class and potentially uses even more memory (e.g. if the
-     * output is a std::shared_ptr to a large object).
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct OnChange final {
-        inline constexpr bool notify() { return true; }
-        inline bool push_value(RET latest) {
-            return last.exchange(latest) != latest;
-        }
-
-      private:
-        Latest<RET> last;
-    };
-
-    /**
-     * @brief A specialization of OnChange for std::shared_ptrs that compares
-     * what the pointers point at
-     */
-    template <typename RET>
-    struct OnChange<std::shared_ptr<RET>> final {
-        inline constexpr bool notify() { return true; }
-        inline bool push_value(std::shared_ptr<RET> latest) {
-            auto previous = last.exchange(latest);
-            if (latest && previous)
-                return *latest == *previous;
-            else
-                return latest == previous;
-        }
-
-      private:
-        Latest<std::shared_ptr<RET>> last;
-    };
-
-    /**
-     * @brief A propagation policy that passes on values but doesn't schedule
-     * downstream Work items to be calculated
-     * @details Useful for circular references
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct Weak final {
-        inline constexpr bool notify() { return false; }
-        inline constexpr bool push_value(RET latest) { return true; }
     };
 
     /**
@@ -407,6 +343,84 @@ namespace calcgraph {
     };
 
     /**
+     * @brief A propagation policy that always recalculates downstream
+     * dependencies
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Always final {
+        inline constexpr bool push_value(RET) { return true; }
+        inline constexpr bool notify() const { return true; }
+    };
+
+    /**
+     * @brief A propagation policy that never recalculates downstream
+     * dependencies
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Never final {
+        inline constexpr bool push_value(RET) { return false; }
+        inline constexpr bool notify() const { return true; }
+    };
+
+    /**
+     * @brief A propagation policy that recalculates downstream dependencies
+     * only if the Node's output changes (according to the != operator)
+     * @details This method isn't thread-safe, but doesn't need to be as it's
+     * only called by Node.eval() when the calculation lock is held. This policy
+     * stores the last output value in the Node, so increases the size of the
+     * templated Node class and potentially uses even more memory (e.g. if the
+     * output is a std::shared_ptr to a large object).
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct OnChange final {
+        inline constexpr bool notify() const { return true; }
+        inline bool push_value(RET latest) {
+            return last.exchange(latest) != latest;
+        }
+
+      private:
+        Latest<RET> last;
+    };
+
+    /**
+     * @brief A specialization of OnChange for std::shared_ptrs that compares
+     * what the pointers point at
+     */
+    template <typename RET>
+    struct OnChange<std::shared_ptr<RET>> final {
+        inline constexpr bool notify() const { return true; }
+        inline bool push_value(std::shared_ptr<RET> latest) {
+            auto previous = last.exchange(latest);
+            if (latest && previous)
+                return *latest == *previous;
+            else
+                return latest == previous;
+        }
+
+      private:
+        Latest<std::shared_ptr<RET>> last;
+    };
+
+    /**
+     * @brief A propagation policy that passes on values but doesn't schedule
+     * downstream Work items to be calculated
+     * @details Useful for circular references
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Weak final {
+        inline constexpr bool notify() const { return false; }
+        inline constexpr bool push_value(RET latest) { return true; }
+    };
+
+    /**
      * @brief A concept for "something you can connect an Input to"
      * @tparam RET The type of the values consumed (and so the type of values
      * the Input should provide)
@@ -429,10 +443,108 @@ namespace calcgraph {
         virtual void disconnect(Input<RET>) = 0;
     };
 
+    template <template <typename> class PROPAGATE, typename RET>
+    class SingleList final : public Connectable<RET> {
+      public:
+        using output_type = RET;
+
+        inline void connect(Input<output_type> a) override {
+            dependents.push_back(a);
+        }
+
+        inline void disconnect(Input<output_type> a) override {
+            auto it = std::find(dependents.begin(), dependents.end(), a);
+            if (it != dependents.end()) {
+                // slightly less shuffling
+                std::swap(*it, dependents.back());
+                dependents.pop_back();
+            }
+        }
+
+        inline void propagate(RET &&val, WorkState &ws) {
+            if (propagation_policy.push_value(val)) {
+
+                for (auto &&dependent : dependents) {
+                    dependent.in->store(val);
+                    if (propagation_policy.notify() && dependent.ref) {
+                        ws.add_to_queue(*dependent.ref);
+                    }
+                }
+            }
+        }
+
+        SingleList() noexcept : dependents(), propagation_policy() {}
+
+      private:
+        /**
+         * @brief Downstream dependencies
+         * @details Not threadsafe so controlled by the Work.next LSB
+         * locking
+         * mechanism
+         */
+        std::vector<Input<output_type>> dependents;
+
+        /**
+         * @brief The propagation policy to use for these inputs
+         */
+        PROPAGATE<RET> propagation_policy;
+    };
+
     /**
-     * @brief A helper for NodeBuilder.connect, to indicate that the given Input
+     * @brief An output policy that passes values to different Inputs
+     *depending
+     * on part of the value (the key, i.e. what std::get<0> returns).
+     *
+     * @tparam RET A templatized std::pair, where the left side is the key
+     *and
+     * the right side is the value to be passed to downstream nodes.
+     */
+    template <template <typename> class PROPAGATE, typename RET>
+    class Multiplexed final : public Connectable<std::shared_ptr<RET>> {
+      public:
+        /**
+         * @brief The type of values that aren't associated with a key
+         * @details Needs to be a shared pointer so we can pass to
+         * downstream
+         * nodes atomically
+         */
+        using output_type = std::shared_ptr<RET>;
+        using key_type = typename RET::first_type;
+        using value_type = typename RET::second_type;
+
+        inline void connect(Input<output_type> a) { unkeyed.connect(a); }
+
+        inline void disconnect(Input<output_type> a) { unkeyed.disconnect(a); }
+
+        inline void propagate(RET &&val, WorkState &ws) {
+            auto found = keyed.find(val.first);
+            if (found == keyed.end()) {
+                // pass the whole thing to the unkeyed output
+                output_type on_heap = std::shared_ptr<RET>(new RET(val));
+                unkeyed.propagate(std::move(on_heap), ws);
+            } else {
+                found->second.propagate(std::move(val.second), ws);
+            }
+        }
+
+        inline Connectable<value_type> &keyed_output(key_type &&key) {
+            auto found = keyed.emplace(std::piecewise_construct,
+                                       std::forward_as_tuple(key),
+                                       std::forward_as_tuple());
+            return found.first->second;
+        }
+
+      private:
+        std::unordered_map<key_type, SingleList<PROPAGATE, value_type>> keyed;
+        SingleList<PROPAGATE, output_type> unkeyed;
+    };
+
+    /**
+     * @brief A helper for NodeBuilder.connect, to indicate that the given
+     * Input
      * shouldn't be connected to anything.
-     * @return An appropriately-cast nullptr that can be passed to connect or
+     * @return An appropriately-cast nullptr that can be passed to connect
+     * or
      * NodeBuilder.connect
      */
     template <typename RET>
@@ -460,7 +572,8 @@ namespace calcgraph {
     }
 
     /**
-     * @brief A building block of the graph; either a raw input or code to be
+     * @brief A building block of the graph; either a raw input or code to
+     * be
      * evaluated.
      */
     class Work {
@@ -505,11 +618,15 @@ namespace calcgraph {
         /**
          * @page worklocking Locking a Work object
          *
-         * We'll use the next pointer of a Work object to store two orthogonal
-         * pieces of information. The LSB will store the "locked" - or exclusive
-         * lock - flag, and the remaining bits will store the next link in the
+         * We'll use the next pointer of a Work object to store two
+         *orthogonal
+         * pieces of information. The LSB will store the "locked" - or
+         *exclusive
+         * lock - flag, and the remaining bits will store the next link in
+         *the
          * (intrusive) Graph.work_queue, or nullptr if this node isn't
-         * scheduled. Note that the locked flag refers to the Work that contains
+         * scheduled. Note that the locked flag refers to the Work that
+         *contains
          * the next pointer, not the Work pointed to.
          */
       private:
@@ -525,7 +642,8 @@ namespace calcgraph {
          * @details This isn't the same as remove this Work item from the
          * Graph's work queue (if it was on it) as it doesn't clear the
          * intrinsic next pointer of any Work item pointing to this one.
-         * @returns Extracts the pointer to the next node on the work_queue, or
+         * @returns Extracts the pointer to the next node on the work_queue,
+         * or
          * nullptr if this Work isn't on a Graph's work_queue.
          */
         Work *dequeue() {
@@ -560,7 +678,8 @@ namespace calcgraph {
 
         /**
          * @brief Release the Work's exclusive lock
-         * @details ...by setting the LSB of the next pointer to zero. Only call
+         * @details ...by setting the LSB of the next pointer to zero. Only
+         * call
          * if you already hold the lock, or the results are undefined.
          */
         void release() {
@@ -577,8 +696,10 @@ namespace calcgraph {
         /** @brief how many Nodes were eval()'ed */
         uint16_t worked;
         /**
-         * @brief how many Nodes were added to this evaluation's heap multiple
-         * times (as they were dependent on more than one queued or dependent
+         * @brief how many Nodes were added to this evaluation's heap
+         * multiple
+         * times (as they were dependent on more than one queued or
+         * dependent
          * Node)
          */
         uint16_t duplicates;
@@ -588,7 +709,8 @@ namespace calcgraph {
          */
         uint16_t pushed_graph;
         /**
-         * @brief how many dependencies were pushed onto this evaluation's work
+         * @brief how many dependencies were pushed onto this evaluation's
+         * work
          * heap to be evaluated in topological order
          */
         uint16_t pushed_heap;
@@ -612,7 +734,8 @@ namespace calcgraph {
     /**
      * @brief The calcuation-graph-wide state
      * @details This class is the only way to make calculation nodes in the
-     * graph, and is in charge of the work_queue, a intrinsic singly-linked list
+     * graph, and is in charge of the work_queue, a intrinsic singly-linked
+     * list
      * of Work that needs re-evaluating due to upstream changes.
      */
     class Graph final {
@@ -621,9 +744,11 @@ namespace calcgraph {
 
         /**
          * @brief Run the graph evaluation to evalute all Work items on the
-         * work_queue, and all items recursively dependent on them (at least,
+         * work_queue, and all items recursively dependent on them (at
+         *least,
          * as determined by each Node's propagation policy).
-         * @details Doesn't release the locks we have on the Work items in the
+         * @details Doesn't release the locks we have on the Work items in
+         *the
          * queue, as we'll just put them in a heap.
          *
          * @return true iff any Work items were eval'ed
@@ -634,7 +759,7 @@ namespace calcgraph {
          * @brief Creates a builder object for Nodes
          * @details Sets the default propagation policy as Always.
          */
-        NodeBuilder<Always> node();
+        NodeBuilder<Always, SingleList> node();
 
       private:
         /**
@@ -664,7 +789,9 @@ namespace calcgraph {
         friend class WorkState;
         template <typename>
         friend class Input;
-        template <template <typename> class, class...>
+        template <template <typename> class,
+                  template <template <typename> class, typename> class,
+                  class...>
         friend class NodeBuilder;
         friend class Work;
 
@@ -679,7 +806,8 @@ namespace calcgraph {
 
     /**
      * @brief An input to a calculation Node
-     * @details Used for putting external data into the calcuation graph, and
+     * @details Used for putting external data into the calcuation graph,
+     *and
      * connecting calculation nodes to each other.
      *
      * @tparam INPUT the type of the values this input accepts.
@@ -688,11 +816,13 @@ namespace calcgraph {
     class Input final {
       public:
         /**
-         * @brief Sets the input to an externally-provided value, and schedules
+         * @brief Sets the input to an externally-provided value, and
+         *schedules
          * the Node we're an Input of on the Graph's work_queue for
          * re-evaluation.
          *
-         * @param graph The owner of the work queue to add the Input's Node to
+         * @param graph The owner of the work queue to add the Input's Node
+         *to
          * @param v The new value to set the Input to
          */
         void append(Graph &graph, INPUT v) {
@@ -718,7 +848,8 @@ namespace calcgraph {
         }
 
         /**
-         * @brief Equality semantics, based on what it's an Input to, but not
+         * @brief Equality semantics, based on what it's an Input to, but
+         * not
          * what the current value is.
          */
         inline bool operator==(const Input &other) const {
@@ -732,7 +863,8 @@ namespace calcgraph {
         Storeable<INPUT> *in;
 
         /**
-         * @brief A ref-counted pointer to the owner of the 'in' Latest, so it
+         * @brief A ref-counted pointer to the owner of the 'in' Latest, so
+         * it
          * doesn't get freed while we're still alive
          */
         boost::intrusive_ptr<Work> ref;
@@ -740,20 +872,24 @@ namespace calcgraph {
         Input(Storeable<INPUT> &in, boost::intrusive_ptr<Work> ref)
             : in(&in), ref(ref) {}
 
-        template <template <typename> class, typename, typename...>
+        template <template <typename> class,
+                  template <template <typename> class, typename> class,
+                  typename, typename...>
         friend class Node;
         template <typename>
         friend class Accumulator;
-        template <template <typename> class, typename>
-        friend class MultiConnectable;
         template <typename>
         friend class Constant;
+        template <template <typename> class PROPAGATE, typename RET>
+        friend class SingleList;
     };
 
     /**
-     * @brief A Connectable object that just passes on its initial value to any
+     * @brief A Connectable object that just passes on its initial value to
+     * any
      * Input connected to it
-     * @tparam RET The type of the constant value, and so what type of Inputs
+     * @tparam RET The type of the constant value, and so what type of
+     * Inputs
      * can be connected
      */
     template <typename RET>
@@ -761,7 +897,8 @@ namespace calcgraph {
       public:
         /**
          * @brief Set the value of this Input to the constant
-         * @details The constant is passed on to the Input immediately - not as
+         * @details The constant is passed on to the Input immediately - not
+         * as
          * part of a Graph evaluation.
          */
         void connect(Input<RET> in) override { in.in->store(value); }
@@ -780,34 +917,47 @@ namespace calcgraph {
     };
 
     /**
-     * @brief A Work item that evaluates a function, and propages the results to
+     * @brief A Work item that evaluates a function, and propages the
+     *results to
      * any connected Inputs.
      * @details The key part of the calculation graph - constructed using a
      * NodeBuilder obtained from Graph.node().
      *
-     * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange), used
+     * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange),
+     *used
      * to decide whether to notify connected Inputs after the FN function is
-     * evaluated. An instance of the policy must have a push_value method, to
-     * decide whether to even tell downstream nodes about the new value, and a
+     * evaluated. An instance of the policy must have a push_value method,
+     *to
+     * decide whether to even tell downstream nodes about the new value, and
+     *a
      * notify method, to decide whether to schedule downstream nodes that we
      * just pushed values to for re-evaluation.
      * @tparam FN The function to evaluate. Must be able to operate on
      * default-constructed INPUTS arguments, as it may be invoked before
      * upstream dependencies pass on their values
-     * @tparam INPUTS The input policies for the parameters of the FN fuction.
+     * @tparam INPUTS The input policies for the parameters of the FN
+     *fuction.
      * You can get the input type of the parameter using INPUTS::type.
      */
-    template <template <typename> class PROPAGATE, typename FN, class... INPUTS>
+    template <template <typename> class PROPAGATE,
+              template <template <typename> class, typename> class OUTPUT,
+              typename FN, typename... INPUTS>
     class Node final
         : public Work,
-          public Connectable<
-              std::result_of_t<FN(typename INPUTS::output_type...)>> {
+          public Connectable<typename OUTPUT<
+              PROPAGATE, std::result_of_t<FN(
+                             typename INPUTS::output_type...)>>::output_type> {
       public:
         using RET =
             typename std::result_of_t<FN(typename INPUTS::output_type...)>;
 
+      private:
+        using output_type = typename OUTPUT<PROPAGATE, RET>::output_type;
+
+      public:
         /**
-         * @brief Get an Input object associated with the N'th argument of this
+         * @brief Get an Input object associated with the N'th argument of
+         *this
          * Node's function FN
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
@@ -827,7 +977,8 @@ namespace calcgraph {
 
         /**
          * @brief Return a Tuple of all the Inputs to this function.
-         * @details Equivalent to calling input() for the N arguments of the FN
+         * @details Equivalent to calling input() for the N arguments of the
+         * FN
          * function
          */
         std::tuple<Input<typename INPUTS::input_type>...> inputtuple() {
@@ -835,13 +986,15 @@ namespace calcgraph {
         }
 
         /**
-         * @brief Add a new Input to the (variadic) the N'th argument of this
+         * @brief Add a new Input to the (variadic) the N'th argument of
+         *this
          * Node's function FN
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
          * Input.append(). Note that this method won't schedule the node for
-         * evaluation, so if you want the expanded vector to be processed you
+         * evaluation, so if you want the expanded vector to be processed
+         *you
          * should schedule the Node directly.
          *
          * @tparam N which function argument to get; it must have a Variadic
@@ -861,14 +1014,16 @@ namespace calcgraph {
         }
 
         /**
-         * @brief Add a new Input to the (variadic) the N'th argument of this
+         * @brief Add a new Input to the (variadic) the N'th argument of
+         *this
          * Node's function FN
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
          * Input.append(). Note that this method won't schedule the node for
          * evaluation, so if you want the reduced vector to be processed you
-         * should schedule the Node directly. The Input must not be used after
+         * should schedule the Node directly. The Input must not be used
+         *after
          * passed to this method.
          *
          * @tparam N which function argument to get; it must have a Variadic
@@ -884,12 +1039,47 @@ namespace calcgraph {
 
         /**
          * @brief Connect an Input to the output of this Node's FN function
-         * @details Newly-calculated values will be fed to the Input according
+         * @details Newly-calculated values will be fed to the Input
+         * according
          * to this Node's PROPAGATE propagation policy
          */
-        void connect(Input<RET> a) override {
+        void connect(Input<output_type> a) override {
             spinlock();
-            dependents.push_back(a);
+            output.connect(a);
+            release();
+        }
+
+        /**
+         * @brief Disconnect an Input from the output of this Node's FN
+         * function
+         * @details Has no effect if the given Input wasn't connected in the
+         * first place.
+         */
+        void disconnect(Input<output_type> a) override {
+            spinlock();
+            output.disconnect(a);
+            release();
+        }
+
+        template <template <template <typename> class, typename>
+                  class O = OUTPUT>
+        typename std::enable_if_t<
+            std::is_same<O<PROPAGATE, RET>, OUTPUT<PROPAGATE, RET>>::value>
+        connect_keyed(typename O<PROPAGATE, RET>::key_type &&key,
+                      Input<typename O<PROPAGATE, RET>::value_type> a) {
+            spinlock();
+            output.keyed_output(std::move(key)).connect(a);
+            release();
+        }
+
+        template <template <template <typename> class, typename>
+                  class O = OUTPUT>
+        typename std::enable_if_t<
+            std::is_same<O<PROPAGATE, RET>, OUTPUT<PROPAGATE, RET>>::value>
+        disconnect_keyed(typename O<PROPAGATE, RET>::key_type &&key,
+                         Input<typename O<PROPAGATE, RET>::value_type> a) {
+            spinlock();
+            output.keyed_output(std::move(key)).disconnect(a);
             release();
         }
 
@@ -897,76 +1087,47 @@ namespace calcgraph {
          * @brief Call the FN function on the current INPUTS values, and
          * propagate the result to any connected Inputs
          * @details Propagation is controlled by the PROPAGATE propagation
-         * policy. This function exclusively locks the Node so only one thread
-         * can call this method at once. If a thread tries to call eval() when
+         * policy. This function exclusively locks the Node so only one
+         * thread
+         * can call this method at once. If a thread tries to call eval()
+         * when
          * the Node is locked, it will instead put this Node back on the
          * WorkState Graph's work_queue.
          */
         void eval(WorkState &ws) override {
             if (!this->trylock()) {
-                // another calculation in progress, so put us on the work queue
-                // (which will change the next pointer to the next node in the
+                // another calculation in progress, so put us on the work
+                // queue
+                // (which will change the next pointer to the next node in
+                // the
                 // work queue, not this)
                 ws.add_to_queue(*this);
                 return;
             }
 
-            // there's a race condition here: this Node can be put on the work
-            // queue, so if the inputs change we'll get rescheduled and re-ran.
-            // We only snap the atomic values in the next statement, so we could
+            // there's a race condition here: this Node can be put on the
+            // work
+            // queue, so if the inputs change we'll get rescheduled and
+            // re-ran.
+            // We only snap the atomic values in the next statement, so we
+            // could
             // pick up newer values than the ones that triggered the
             // recalculation of this Node, so the subsequent re-run would
-            // be unnecessary. See the OnChange propagation policy to mitagate
+            // be unnecessary. See the OnChange propagation policy to
+            // mitagate
             // this (your function should be idempotent!).
 
             RET val = call_fn(std::index_sequence_for<INPUTS...>{});
-
-            if (propagate.push_value(val)) {
-                for (auto dependent = this->dependents.begin();
-                     dependent != this->dependents.end(); dependent++) {
-
-                    // pass on the new value & schedule the dowstream work
-                    dependent->in->store(val);
-                    if (propagate.notify() && dependent->ref) {
-                        ws.add_to_queue(*dependent->ref);
-                    }
-                }
-            }
+            output.propagate(std::move(val), ws);
 
             this->release();
         }
 
-        /**
-         * @brief Disconnect an Input from the output of this Node's FN function
-         * @details Has no effect if the given Input wasn't connected in the
-         * first place.
-         */
-        void disconnect(Input<RET> a) override {
-            spinlock();
-
-            auto it = std::find(dependents.begin(), dependents.end(), a);
-            if (it != dependents.end()) {
-                // slightly less shuffling
-                std::swap(*it, dependents.back());
-                dependents.pop_back();
-            }
-
-            release();
-        }
-
       private:
         /**
-         * @brief Downstream dependencies
-         * @details Not threadsafe so controlled by the Work.next LSB locking
-         * mechanism
+         * The policy on what connected values to pass FN outputs to
          */
-        std::vector<Input<RET>> dependents;
-
-        /**
-         * @brief The policy on when to propagate newly-calcuated values to
-         * dependents
-         */
-        PROPAGATE<RET> propagate;
+        OUTPUT<PROPAGATE, RET> output;
 
         const FN fn;
         std::tuple<INPUTS...> inputs;
@@ -984,24 +1145,32 @@ namespace calcgraph {
                 input<I>()...);
         }
 
-        template <template <typename> class, class...>
+        template <template <typename> class,
+                  template <template <typename> class, typename> class,
+                  class...>
         friend class NodeBuilder;
     };
 
     /**
      * @brief A builder-pattern object for constructing Nodes
-     * @details Can be reused to create multiple Nodes. Arguments can be passed
+     * @details Can be reused to create multiple Nodes. Arguments can be
+     *passed
      * either to successive calls to latest and accumulate (if you want to
-     * specify the input policy) or passed all at once to connect (if you just
-     * need the default input policy, Latest), or a mixture (in which case the
+     * specify the input policy) or passed all at once to connect (if you
+     *just
+     * need the default input policy, Latest), or a mixture (in which case
+     *the
      * parameters passed to connect come after those passed to latest and
      * accumulate).
      *
-     * @tparam PROPAGATE the propagation policy used by the Nodes it constructs
+     * @tparam PROPAGATE the propagation policy used by the Nodes it
+     *constructs
      * @tparam INPUTS the input policies of the first N arguments of the
      *function passed to connect
      */
-    template <template <typename> class PROPAGATE, class... INPUTS>
+    template <template <typename> class PROPAGATE,
+              template <template <typename> class, typename> class OUTPUT,
+              class... INPUTS>
     class NodeBuilder final {
       public:
         /**
@@ -1012,7 +1181,13 @@ namespace calcgraph {
          */
         template <template <typename> class NEWPROPAGATE>
         auto propagate() {
-            return NodeBuilder<NEWPROPAGATE, INPUTS...>(g, connected);
+            return NodeBuilder<NEWPROPAGATE, OUTPUT, INPUTS...>(g, connected);
+        }
+
+        template <template <template <typename> class, typename>
+                  class NEWOUTPUT>
+        auto output() {
+            return NodeBuilder<PROPAGATE, NEWOUTPUT, INPUTS...>(g, connected);
         }
 
         /**
@@ -1042,16 +1217,23 @@ namespace calcgraph {
         /**
          * @brief Build a Node
          *
-         * @param fn The function the node should execute. The newly-constructed
-         * node will be schedule for evaluation on the Graph, so this function
-         * should be able to accept default-constructed values of its Inputs (as
-         * it may be evaluated before upstream dependencies pass on values to
+         * @param fn The function the node should execute. The
+         *newly-constructed
+         * node will be schedule for evaluation on the Graph, so this
+         *function
+         * should be able to accept default-constructed values of its Inputs
+         *(as
+         * it may be evaluated before upstream dependencies pass on values
+         *to
          * it)
          * @param args Any additional Connectable objects (including
-         * calcgraph::unconnected() objects) or appropriately-cast nullptrs to
+         * calcgraph::unconnected() objects) or appropriately-cast nullptrs
+         *to
          * provide values for the calculation function. The Graph will
-         * recalcuate the Node when any one of these Connectable objects pass on
-         * a new value to the Node (coalescing where possible). This arguments
+         * recalcuate the Node when any one of these Connectable objects
+         *pass on
+         * a new value to the Node (coalescing where possible). This
+         *arguments
          * are appended to those passed to this NodeBuilder via calls to
          * accumulate or latest.
          * @tparam VALS The types of the function's arguments, not the input
@@ -1063,9 +1245,9 @@ namespace calcgraph {
 
             // first, make the node
             auto node = boost::intrusive_ptr<
-                Node<PROPAGATE, FN, INPUTS..., Latest<VALS>...>>(
-                new Node<PROPAGATE, FN, INPUTS..., Latest<VALS>...>(g.ids++,
-                                                                    fn));
+                Node<PROPAGATE, OUTPUT, FN, INPUTS..., Latest<VALS>...>>(
+                new Node<PROPAGATE, OUTPUT, FN, INPUTS..., Latest<VALS>...>(
+                    g.ids++, fn));
 
             // next, connect any given inputs
             auto newargs =
@@ -1091,7 +1273,9 @@ namespace calcgraph {
             : g(g), connected(connected) {}
 
         friend class Graph;
-        template <template <typename> class, class...>
+        template <template <typename> class,
+                  template <template <typename> class, typename> class,
+                  class...>
         friend class NodeBuilder;
 
         template <template <class> class POLICY, typename VAL>
@@ -1101,18 +1285,23 @@ namespace calcgraph {
                 Connectable<typename POLICY<VAL>::input_type> *>(
                 std::move(arg));
             auto concatted = std::tuple_cat(connected, std::move(newarg));
-            return NodeBuilder<PROPAGATE, INPUTS..., POLICY<VAL>>(g, concatted);
+            return NodeBuilder<PROPAGATE, OUTPUT, INPUTS..., POLICY<VAL>>(
+                g, concatted);
         }
     };
 
     // see comments in declaration
-    NodeBuilder<Always> Graph::node() { return NodeBuilder<Always>(*this); }
+    NodeBuilder<Always, SingleList> Graph::node() {
+        return NodeBuilder<Always, SingleList>(*this);
+    }
 
     // see comments in declaration
     void WorkState::add_to_queue(Work &work) {
-        // note that the or-equals part of the check is important; if we failed
+        // note that the or-equals part of the check is important; if we
+        // failed
         // to calculate work this time then work.id == current_id, and we
-        // want to put the work back on the graph queue for later evaluation.
+        // want to put the work back on the graph queue for later
+        // evaluation.
         if (work.id <= current_id) {
             // process it next Graph()
             work.schedule(g);
@@ -1180,7 +1369,8 @@ namespace calcgraph {
             if (stats)
                 stats->worked++;
 
-            // finally finished with this Work - it's not on the Graph queue or
+            // finally finished with this Work - it's not on the Graph queue
+            // or
             // the heap
             intrusive_ptr_release(w);
         }
@@ -1230,13 +1420,17 @@ namespace calcgraph {
 
     /**
      * @brief Repeatedly evaluate the Graph's work queue
-     * @details Evaluate in a busy-loop, only yielding when there's no work to
-     * do. Doesn't block. This avoids having to pay the cost of mutex-related
-     * system calls if we slept on a mutex (and appending an Input would have to
+     * @details Evaluate in a busy-loop, only yielding when there's no work
+     *to
+     * do. Doesn't block. This avoids having to pay the cost of
+     *mutex-related
+     * system calls if we slept on a mutex (and appending an Input would
+     *have to
      * lock the same mutex when notifying this evalution thread).
      *
      * @param g The graph containing the work_queue to evaluate
-     * @param stop When set, the thread will exit its busy-loop the next time it
+     * @param stop When set, the thread will exit its busy-loop the next
+     *time it
      * sees the work_queue empty
      */
     void evaluate_repeatedly(Graph &g, std::atomic<bool> &stop) {
