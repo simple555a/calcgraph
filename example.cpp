@@ -230,6 +230,21 @@ int main() {
             benchmark, build_pipeline(benchmark, curve_fitter.get()));
     }
 
+    auto builder =
+        g.node()
+            .accumulate(dispatcher.get())
+            .initialize(dispatcher)
+            .initialize(curve_fitter)
+            .connect([](auto new_tickers, auto dispatcher, auto curve_fitter) {
+                for (auto new_ticker : *new_tickers) {
+                    auto input =
+                        build_pipeline(new_ticker->first, curve_fitter.get());
+                    dispatcher->connect_keyed(new_ticker->first, input, true);
+                    input.append(g, new_ticker->second); // always pass on
+                }
+                return nullptr;
+            });
+
     if (!listen_to_datagrams(dispatcher->input<0>())) {
         stop.store(true);
     }

@@ -545,6 +545,34 @@ class GraphTest final : public CppUnit::TestFixture {
             .connect(intvector_identity);
     }
 
+    void testOnlyIfUnconnected() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        calcgraph::Accumulate<int> always_send, send_if_connected;
+
+        // setup
+        auto node = g.node()
+                        .latest(calcgraph::unconnected<int>())
+                        .connect(int_identity);
+
+        node->connect(always_send, false);
+        node->connect(always_send, false);
+        node->connect(send_if_connected, true);
+        node->connect(send_if_connected, true);
+
+        node->input<0>().append(g, 7);
+        g(&stats);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
+        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
+
+        auto expected_two = always_send.read();
+        CPPUNIT_ASSERT(
+            std::count(expected_two->begin(), expected_two->end(), 7) == 2);
+        auto expected_one = send_if_connected.read();
+        CPPUNIT_ASSERT(
+            std::count(expected_one->begin(), expected_one->end(), 7) == 1);
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testAsserts);
     CPPUNIT_TEST(testSingleNode);

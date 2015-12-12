@@ -430,8 +430,9 @@ namespace calcgraph {
          * @brief Connect the given Input to this object.
          * @details Must be thread-safe and can be called multiple times on any
          * given object.
+         * @returns true iff the connection was made
          */
-        virtual void connect(Input<RET>) = 0;
+        virtual bool connect(Input<RET>, bool only_if_unconnected) = 0;
 
         /**
          * @brief Disconnects the given Input from this object.
@@ -448,8 +449,15 @@ namespace calcgraph {
         using key_type = std::nullptr_t;
         using value_type = std::nullptr_t;
 
-        inline void connect(Input<output_type> a) override {
+        inline bool connect(Input<output_type> a,
+                            bool only_if_unconnected) override {
+            if (only_if_unconnected &&
+                std::find(dependents.begin(), dependents.end(), a) !=
+                    dependents.end()) {
+                return false;
+            }
             dependents.push_back(a);
+            return true;
         }
 
         inline void disconnect(Input<output_type> a) override {
@@ -512,7 +520,9 @@ namespace calcgraph {
         using key_type = typename RET::first_type;
         using value_type = typename RET::second_type;
 
-        inline void connect(Input<output_type> a) { unkeyed.connect(a); }
+        inline bool connect(Input<output_type> a, bool only_if_unconnected) {
+            return unkeyed.connect(a, only_if_unconnected);
+        }
 
         inline void disconnect(Input<output_type> a) { unkeyed.disconnect(a); }
 
@@ -556,7 +566,10 @@ namespace calcgraph {
             using value_type =
                 typename OUTPUT<PROPAGATE, single_type>::value_type;
 
-            inline void connect(Input<output_type> a) { output.connect(a); }
+            inline bool connect(Input<output_type> a,
+                                bool only_if_unconnected) {
+                return output.connect(a, only_if_unconnected);
+            }
 
             inline void disconnect(Input<output_type> a) {
                 output.disconnect(a);
@@ -597,9 +610,9 @@ namespace calcgraph {
      * @tparam RET the type of the Input and target
      */
     template <typename RET>
-    inline void connect(Connectable<RET> *to, Input<RET> from) {
-        if (to)
-            to->connect(from);
+    inline bool connect(Connectable<RET> *to, Input<RET> from,
+                        bool only_if_unconnected) {
+        return to && to->connect(from, only_if_unconnected);
     }
 
     namespace flags {
@@ -849,7 +862,8 @@ namespace calcgraph {
                         std::tuple<Connectable<INPUTS> *...> tos,
                         std::tuple<Input<INPUTS>...> froms) {
             int forceexpansion[] = {
-                0, (connect(std::get<I>(tos), std::get<I>(froms)), 0)...};
+                0,
+                (connect(std::get<I>(tos), std::get<I>(froms), false), 0)...};
         }
     };
 
@@ -1060,10 +1074,12 @@ namespace calcgraph {
          * according
          * to this Node's PROPAGATE propagation policy
          */
-        void connect(Input<output_type> a) override {
+        bool connect(Input<output_type> a,
+                     bool only_if_unconnected = false) override {
             spinlock();
-            output.connect(a);
+            bool ret = output.connect(a, only_if_unconnected);
             release();
+            return ret;
         }
 
         /**
@@ -1081,12 +1097,15 @@ namespace calcgraph {
         template <template <template <typename> class, typename>
                   class O = OUTPUT>
         typename std::enable_if_t<
-            std::is_same<O<PROPAGATE, RET>, OUTPUT<PROPAGATE, RET>>::value>
+            std::is_same<O<PROPAGATE, RET>, OUTPUT<PROPAGATE, RET>>::value,
+            bool>
         connect_keyed(typename O<PROPAGATE, RET>::key_type key,
-                      Input<typename O<PROPAGATE, RET>::value_type> a) {
+                      Input<typename O<PROPAGATE, RET>::value_type> a,
+                      bool only_if_unconnected = false) {
             spinlock();
-            output.keyed_output(key).connect(a);
+            bool ret = output.keyed_output(key).connect(a, only_if_unconnected);
             release();
+            return ret;
         }
 
         template <template <template <typename> class, typename>
