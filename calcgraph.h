@@ -447,6 +447,8 @@ namespace calcgraph {
     class SingleList final : public Connectable<RET> {
       public:
         using output_type = RET;
+        using key_type = std::nullptr_t;
+        using value_type = std::nullptr_t;
 
         inline void connect(Input<output_type> a) override {
             dependents.push_back(a);
@@ -527,7 +529,7 @@ namespace calcgraph {
             }
         }
 
-        inline Connectable<value_type> &keyed_output(key_type &&key) {
+        inline Connectable<value_type> &keyed_output(key_type key) {
             auto found = keyed.emplace(std::piecewise_construct,
                                        std::forward_as_tuple(key),
                                        std::forward_as_tuple());
@@ -546,13 +548,15 @@ namespace calcgraph {
             : public Connectable<typename OUTPUT<
                   PROPAGATE,
                   typename RET::element_type::value_type>::output_type> {
-
           private:
-            using value_type = typename RET::element_type::value_type;
+            using single_type = typename RET::element_type::value_type;
 
           public:
             using output_type =
-                typename OUTPUT<PROPAGATE, value_type>::output_type;
+                typename OUTPUT<PROPAGATE, single_type>::output_type;
+            using key_type = typename OUTPUT<PROPAGATE, single_type>::key_type;
+            using value_type =
+                typename OUTPUT<PROPAGATE, single_type>::value_type;
 
             inline void connect(Input<output_type> a) { output.connect(a); }
 
@@ -566,8 +570,12 @@ namespace calcgraph {
                 }
             }
 
+            inline Connectable<value_type> &keyed_output(key_type key) {
+                return output.keyed_output(key);
+            }
+
           private:
-            OUTPUT<PROPAGATE, value_type> output;
+            OUTPUT<PROPAGATE, single_type> output;
         };
     };
 
@@ -792,6 +800,17 @@ namespace calcgraph {
          * @details Sets the default propagation policy as Always.
          */
         NodeBuilder<Always, SingleList> node();
+
+        ~Graph() {
+            auto head =
+                work_queue.exchange(&tombstone, std::memory_order_acq_rel);
+            Work *w = head;
+            while (w != &tombstone) {
+                Work *next = w->dequeue(); // read before deleting
+                intrusive_ptr_release(w);
+                w = next;
+            }
+        }
 
       private:
         /**
@@ -1097,10 +1116,10 @@ namespace calcgraph {
                   class O = OUTPUT>
         typename std::enable_if_t<
             std::is_same<O<PROPAGATE, RET>, OUTPUT<PROPAGATE, RET>>::value>
-        connect_keyed(typename O<PROPAGATE, RET>::key_type &&key,
+        connect_keyed(typename O<PROPAGATE, RET>::key_type key,
                       Input<typename O<PROPAGATE, RET>::value_type> a) {
             spinlock();
-            output.keyed_output(std::move(key)).connect(a);
+            output.keyed_output(key).connect(a);
             release();
         }
 
@@ -1108,10 +1127,10 @@ namespace calcgraph {
                   class O = OUTPUT>
         typename std::enable_if_t<
             std::is_same<O<PROPAGATE, RET>, OUTPUT<PROPAGATE, RET>>::value>
-        disconnect_keyed(typename O<PROPAGATE, RET>::key_type &&key,
+        disconnect_keyed(typename O<PROPAGATE, RET>::key_type key,
                          Input<typename O<PROPAGATE, RET>::value_type> a) {
             spinlock();
-            output.keyed_output(std::move(key)).disconnect(a);
+            output.keyed_output(key).disconnect(a);
             release();
         }
 

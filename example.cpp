@@ -14,9 +14,8 @@
 
 using uint8_vector = std::shared_ptr<std::vector<uint8_t>>;
 using double_vector = std::shared_ptr<std::vector<double>>;
-using price_input_map =
-    std::unordered_map<std::uint8_t, calcgraph::Input<double>>;
-using price_input_map_ptr = std::shared_ptr<price_input_map>;
+using uint8double_vector =
+    std::shared_ptr<std::vector<std::pair<uint8_t, double>>>;
 using string = std::shared_ptr<std::string>;
 using strings = std::shared_ptr<std::forward_list<string>>;
 
@@ -90,17 +89,13 @@ double_vector polyfit(const uint8_vector dx, const double_vector dy) {
     return out;
 }
 
-using curve_fitter_node = boost::intrusive_ptr<calcgraph::Node<
-    calcgraph::OnChange, double_vector (*)(uint8_vector, double_vector),
-    calcgraph::Variadic<uint8_t>, calcgraph::Variadic<double>>>;
-
-calcgraph::Input<double> build_pipeline(uint8_t ticker,
-                                        curve_fitter_node curve_fitter) {
+calcgraph::Input<double>
+build_pipeline(uint8_t ticker, calcgraph::Connectable<double_vector> *curve) {
     auto signal_generator =
         g.node()
             .propagate<calcgraph::OnChange>()
             .latest(calcgraph::unconnected<double>())
-            .latest(curve_fitter.get())
+            .latest(curve)
             .connect([ticker](double price,
                               double_vector yield_curve) -> TradeSignal {
                 if (!yield_curve || !price) {
@@ -126,37 +121,18 @@ calcgraph::Input<double> build_pipeline(uint8_t ticker,
                     return HOLD;
             });
 
-    if (BENCHMARKS.find(ticker) != BENCHMARKS.end()) {
-        // this is a benchmark, so wire it up to the curve fitter
-        return signal_generator->input<0>();
-    } else {
-        return signal_generator->input<0>();
-    }
+    return signal_generator->input<0>();
 }
 
-price_input_map_ptr dispatch(strings msgs, price_input_map_ptr map,
-                             curve_fitter_node curve_fitter) {
-    if (!map) {
-        map = price_input_map_ptr(new price_input_map());
-    }
-    if (!curve_fitter) {
-        return map;
-    }
-
-    std::for_each(msgs->begin(), msgs->end(), [map, curve_fitter](string &msg) {
-        // parse the message
+uint8double_vector dispatch(strings msgs) {
+    uint8double_vector ret =
+        uint8double_vector(new uint8double_vector::element_type());
+    for (auto msg : *msgs) {
         uint8_t ticker = std::stoi(*msg);
         double price = std::stod(msg->substr(msg->find(" ") + 1));
-
-        // pass it to the right output
-        auto input = map->find(ticker);
-        if (input == map->end()) {
-            input = map->insert({ticker, build_pipeline(ticker, curve_fitter)})
-                        .first;
-        }
-        input->second.append(g, price);
-    });
-    return map;
+        ret->emplace_back(ticker, price);
+    }
+    return ret;
 }
 
 /**
@@ -225,20 +201,27 @@ int main() {
 
     std::thread t(calcgraph::evaluate_repeatedly, std::ref(g), std::ref(stop));
 
-    calcgraph::Constant<curve_fitter_node> curve_fitter =
+    auto dispatcher =
         g.node()
             .propagate<calcgraph::OnChange>()
-            .variadic<uint8_t>()
-            .variadic<double>()
-            .connect(polyfit);
+            .output<calcgraph::MultiValued<calcgraph::Multiplexed>::type>()
+            .accumulate(calcgraph::unconnected<string>())
+            .connect(dispatch);
 
-    auto dispatcher = g.node()
-                          .propagate<calcgraph::Weak>()
-                          .accumulate(calcgraph::unconnected<string>())
-                          .latest(calcgraph::unconnected<price_input_map_ptr>())
-                          .latest(&curve_fitter)
-                          .connect(dispatch);
-    dispatcher->connect(dispatcher->input<1>());
+    auto curve_fitter = g.node()
+                            .propagate<calcgraph::OnChange>()
+                            .variadic<uint8_t>()
+                            .variadic<double>()
+                            .connect(polyfit);
+
+    for (uint8_t benchmark : BENCHMARKS) {
+        calcgraph::Constant<uint8_t>(benchmark)
+            .connect(curve_fitter->variadic_add<0>());
+        dispatcher->connect_keyed(benchmark, curve_fitter->variadic_add<1>());
+
+        dispatcher->connect_keyed(
+            benchmark, build_pipeline(benchmark, curve_fitter.get()));
+    }
 
     if (!listen_to_datagrams(dispatcher->input<0>())) {
         stop.store(true);

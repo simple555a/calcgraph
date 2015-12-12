@@ -532,6 +532,18 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT(res.read() == 2);
     }
 
+    /**
+     * @brief Check the Node scheduled on the work queue is cleaned up by the
+     * Graph's destructor
+     */
+    void testMemoryLeak() {
+        calcgraph::Graph g;
+        g.node()
+            .output<calcgraph::MultiValued<calcgraph::SingleList>::type>()
+            .latest(calcgraph::unconnected<intvector>())
+            .connect(intvector_identity);
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testAsserts);
     CPPUNIT_TEST(testSingleNode);
@@ -546,6 +558,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testVariadic);
     CPPUNIT_TEST(testMultiplexed);
     CPPUNIT_TEST(testMultiValued);
+    CPPUNIT_TEST(testMemoryLeak);
     CPPUNIT_TEST_SUITE_END();
 };
 

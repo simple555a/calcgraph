@@ -9,7 +9,7 @@ example: example.cpp calcgraph.h
 	$(CXX) $(CPPFLAGS) example.cpp $(shell pkg-config --libs --cflags gsl boost) -o example
 
 check: test
-	time ./test
+	valgrind --leak-check=full --show-leak-kinds=all ./test
 
 clean:
 	rm -r test example *.o latex *.dSYM 2>/dev/null || true
