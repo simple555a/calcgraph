@@ -99,8 +99,8 @@ class GraphTest final : public CppUnit::TestFixture {
         calcgraph::Graph g;
         calcgraph::Latest<int> res;
 
-        calcgraph::Constant<int> one(1), two(2);
-        auto node = g.node().connect(std::plus<int>(), &one, &two);
+        auto node =
+            g.node().initialize(1).initialize(2).connect(std::plus<int>());
         node->connect(calcgraph::Input<int>(res));
 
         g(&stats);
@@ -270,13 +270,14 @@ class GraphTest final : public CppUnit::TestFixture {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
         calcgraph::Latest<std::size_t> res;
-        calcgraph::Constant<intvector> it(intvector(new std::vector<int>()));
 
         // setup
-        auto adder = g.node().connect([](intvector arr, int v) {
-            arr->push_back(v);
-            return arr;
-        }, &it, calcgraph::unconnected<int>());
+        auto adder = g.node()
+                         .initialize(intvector(new std::vector<int>()))
+                         .connect([](intvector arr, int v) {
+                             arr->push_back(v);
+                             return arr;
+                         }, calcgraph::unconnected<int>());
         auto sizer = g.node().connect([](intvector arr) { return arr->size(); },
                                       adder.get());
         sizer->connect(calcgraph::Input<std::size_t>(res));

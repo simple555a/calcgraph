@@ -26,8 +26,6 @@ namespace calcgraph {
     class Node;
     template <typename>
     class Connectable;
-    template <typename>
-    class Constant;
     template <template <typename> class,
               template <template <typename> class, typename> class, class...>
     class NodeBuilder;
@@ -86,7 +84,7 @@ namespace calcgraph {
             return val.exchange(other, std::memory_order_acq_rel);
         }
 
-        Latest() noexcept : val() {}
+        Latest(input_type initial = {}) noexcept : val(initial) {}
         Latest(const Latest &other) = delete;
 
       private:
@@ -115,7 +113,7 @@ namespace calcgraph {
                                                  std::memory_order_acq_rel);
         }
 
-        Latest() noexcept : val() {}
+        Latest(input_type initial = {}) noexcept : val(initial) {}
         Latest(const Latest &other) = delete;
 
       private:
@@ -159,7 +157,7 @@ namespace calcgraph {
                 val.exchange(other.detach(), std::memory_order_acq_rel), false);
         }
 
-        Latest() noexcept : val() {}
+        Latest(input_type initial = {}) noexcept { store(initial); }
         Latest(const Latest &other) = delete;
 
       private:
@@ -215,7 +213,7 @@ namespace calcgraph {
             return ret;
         }
 
-        Accumulate() noexcept : head() {}
+        Accumulate(input_type initial = {}) noexcept : head() {}
         Accumulate(const Accumulate &other) = delete;
 
       private:
@@ -264,7 +262,7 @@ namespace calcgraph {
             return out;
         }
 
-        Variadic() noexcept : inputs() {}
+        Variadic(input_type initial = nullptr) noexcept : inputs() {}
         Variadic(const Variadic &other) = delete;
 
       private:
@@ -281,11 +279,11 @@ namespace calcgraph {
          * @details Always created at the end. Only call when the containing
          * Node's lock is held.
          */
-        inline Latest<VAL> &add_input() {
+        inline Latest<VAL> &add_input(VAL initial = {}) {
             auto before_end = inputs.before_begin();
             for (auto &_ : inputs)
                 ++before_end;
-            inputs.emplace_after(before_end);
+            inputs.emplace_after(before_end, initial);
             ++before_end; // point to the new element
             return *before_end;
         }
@@ -929,42 +927,8 @@ namespace calcgraph {
         friend class Node;
         template <typename>
         friend class Accumulator;
-        template <typename>
-        friend class Constant;
         template <template <typename> class PROPAGATE, typename RET>
         friend class SingleList;
-    };
-
-    /**
-     * @brief A Connectable object that just passes on its initial value to
-     * any
-     * Input connected to it
-     * @tparam RET The type of the constant value, and so what type of
-     * Inputs
-     * can be connected
-     */
-    template <typename RET>
-    class Constant : public Connectable<RET> {
-      public:
-        /**
-         * @brief Set the value of this Input to the constant
-         * @details The constant is passed on to the Input immediately - not
-         * as
-         * part of a Graph evaluation.
-         */
-        void connect(Input<RET> in) override { in.in->store(value); }
-
-        /**
-         * @brief Has no effect
-         */
-        void disconnect(Input<RET> in) override {}
-
-        Constant(RET value) noexcept : value(value) {}
-        Constant(Constant &&other) noexcept : value(std::move(other.value)) {}
-        Constant(const Constant &other) noexcept : value(other.value) {}
-
-      private:
-        RET value;
     };
 
     /**
@@ -1054,11 +1018,13 @@ namespace calcgraph {
         template <std::size_t N>
         Input<typename std::tuple_element_t<
             N, typename std::tuple<INPUTS...>>::element_type>
-        variadic_add() {
+        variadic_add(
+            typename std::tuple_element_t<
+                N, typename std::tuple<INPUTS...>>::element_type initial = {}) {
             spinlock();
             auto ret = Input<typename std::tuple_element_t<
                 N, typename std::tuple<INPUTS...>>::element_type>(
-                std::get<N>(inputs).add_input(),
+                std::get<N>(inputs).add_input(initial),
                 boost::intrusive_ptr<Work>(this));
             release();
             return ret;
@@ -1175,7 +1141,9 @@ namespace calcgraph {
         const FN fn;
         std::tuple<INPUTS...> inputs;
 
-        Node(uint32_t id, const FN fn) : Work(id), fn(fn) {}
+        Node(uint32_t id, const FN fn,
+             std::tuple<typename INPUTS::input_type...> initials)
+            : Work(id), fn(fn), inputs(initials) {}
         friend class Graph;
 
         template <std::size_t... I>
@@ -1198,8 +1166,7 @@ namespace calcgraph {
      * @brief A builder-pattern object for constructing Nodes
      * @details Can be reused to create multiple Nodes. Arguments can be
      * passed either to successive calls to latest and accumulate (if you want
-     *to
-     * specify the input policy) or passed all at once to connect (if you
+     * to specify the input policy) or passed all at once to connect (if you
      * just need the default input policy, Latest), or a mixture (in which case
      * the parameters passed to connect come after those passed to latest and
      * accumulate).
@@ -1222,13 +1189,15 @@ namespace calcgraph {
          */
         template <template <typename> class NEWPROPAGATE>
         auto propagate() {
-            return NodeBuilder<NEWPROPAGATE, OUTPUT, INPUTS...>(g, connected);
+            return NodeBuilder<NEWPROPAGATE, OUTPUT, INPUTS...>(g, connected,
+                                                                initials);
         }
 
         template <template <template <typename> class, typename>
                   class NEWOUTPUT>
         auto output() {
-            return NodeBuilder<PROPAGATE, NEWOUTPUT, INPUTS...>(g, connected);
+            return NodeBuilder<PROPAGATE, NEWOUTPUT, INPUTS...>(g, connected,
+                                                                initials);
         }
 
         /**
@@ -1241,10 +1210,26 @@ namespace calcgraph {
 
         /**
          * @brief Add an argument with a Latest input policy
+         *
+         * @param initial The initial value for this argument - if no new values
+         *are passed via an Input this value will be used by the Node when its
+         *function is called. If not given the initial argument will be a
+         *default-constructed type.
          */
         template <typename VAL>
-        auto latest(Connectable<VAL> *arg) {
-            return doconnect<Latest, VAL>(arg);
+        auto latest(Connectable<VAL> *arg, VAL initial = {}) {
+            return doconnect<Latest, VAL>(arg, std::move(initial));
+        }
+
+        /**
+         * @brief Add an argument with a Latest input policy, with the given
+         * initial value
+         * @details Useful for implementing constant inputs to the Graph.
+         */
+        template <typename VAL>
+        auto initialize(VAL initial) {
+            return doconnect<Latest, VAL>(unconnected<VAL>(),
+                                          std::move(initial));
         }
 
         /**
@@ -1257,26 +1242,21 @@ namespace calcgraph {
 
         /**
          * @brief Build a Node
+         * @details Any extract Connectable arguments can't be given default
+         *values using this method - use latest(...) instead.
          *
          * @param fn The function the node should execute. The
-         *newly-constructed
-         * node will be schedule for evaluation on the Graph, so this
-         *function
-         * should be able to accept default-constructed values of its Inputs
-         *(as
-         * it may be evaluated before upstream dependencies pass on values
-         *to
-         * it)
+         *newly-constructed node will be schedule for evaluation on the Graph,
+         *so this function should be able to accept default-constructed values
+         *of its Inputs (as it may be evaluated before upstream dependencies
+         *pass on values to it)
          * @param args Any additional Connectable objects (including
          * calcgraph::unconnected() objects) or appropriately-cast nullptrs
-         *to
-         * provide values for the calculation function. The Graph will
+         *to provide values for the calculation function. The Graph will
          * recalcuate the Node when any one of these Connectable objects
-         *pass on
-         * a new value to the Node (coalescing where possible). This
-         *arguments
-         * are appended to those passed to this NodeBuilder via calls to
-         * accumulate or latest.
+         *pass on a new value to the Node (coalescing where possible). This
+         *arguments are appended to those passed to this NodeBuilder via calls
+         *to accumulate or latest.
          * @tparam VALS The types of the function's arguments, not the input
          * policy.
          * @return A new Node
@@ -1285,17 +1265,20 @@ namespace calcgraph {
         auto connect(const FN fn, Connectable<VALS> *... args) {
 
             // first, make the node
+            std::tuple<VALS...> newinitials{};
+            auto finalinitials =
+                std::tuple_cat(initials, std::move(newinitials));
             auto node = boost::intrusive_ptr<
                 Node<PROPAGATE, OUTPUT, FN, INPUTS..., Latest<VALS>...>>(
                 new Node<PROPAGATE, OUTPUT, FN, INPUTS..., Latest<VALS>...>(
-                    g.ids++, fn));
+                    g.ids++, fn, finalinitials));
 
             // next, connect any given inputs
             auto newargs =
                 std::make_tuple<Connectable<VALS> *...>(std::move(args)...);
-            auto concatted = std::tuple_cat(connected, std::move(newargs));
+            auto finalargs = std::tuple_cat(connected, std::move(newargs));
             g.connectall(std::index_sequence_for<INPUTS..., VALS...>{},
-                         concatted, node->inputtuple());
+                         finalargs, node->inputtuple());
 
             // finally schedule it for evaluation
             node->schedule(g);
@@ -1305,13 +1288,14 @@ namespace calcgraph {
       private:
         using STORED =
             std::tuple<Connectable<typename INPUTS::input_type> *...>;
+        using INITIALS = std::tuple<typename INPUTS::input_type...>;
 
         Graph &g;
-        STORED
-        connected;
+        STORED connected;
+        INITIALS initials;
 
-        NodeBuilder(Graph &g, STORED connected = STORED())
-            : g(g), connected(connected) {}
+        NodeBuilder(Graph &g, STORED connected = {}, INITIALS initials = {})
+            : g(g), connected(connected), initials(initials) {}
 
         friend class Graph;
         template <template <typename> class,
@@ -1319,15 +1303,21 @@ namespace calcgraph {
                   class...>
         friend class NodeBuilder;
 
-        template <template <class> class POLICY, typename VAL>
-        inline auto doconnect(
-            Connectable<typename POLICY<VAL>::input_type> *arg) {
-            auto newarg = std::make_tuple<
-                Connectable<typename POLICY<VAL>::input_type> *>(
-                std::move(arg));
-            auto concatted = std::tuple_cat(connected, std::move(newarg));
+        template <template <class> class POLICY, typename VAL,
+                  typename input_type = typename POLICY<VAL>::input_type>
+        inline auto doconnect(Connectable<input_type> *arg,
+                              input_type &&initial = {}) {
+
+            auto new_arg =
+                std::make_tuple<Connectable<input_type> *>(std::move(arg));
+            auto new_initial = std::make_tuple<input_type>(std::move(initial));
+
+            auto new_connected = std::tuple_cat(connected, std::move(new_arg));
+            auto new_initials =
+                std::tuple_cat(initials, std::move(new_initial));
+
             return NodeBuilder<PROPAGATE, OUTPUT, INPUTS..., POLICY<VAL>>(
-                g, concatted);
+                g, new_connected, new_initials);
         }
     };
 

@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <set>
 #include <string>
+#include <limits>
 
 #include "calcgraph.h"
 
@@ -60,6 +61,12 @@ enum TradeSignal { BUY, SELL, HOLD };
  * @see http://rosettacode.org/wiki/Polynomial_regression#C
  */
 double_vector polyfit(const uint8_vector dx, const double_vector dy) {
+
+    // can't fit NaN prices
+    if (std::any_of(dy->begin(), dy->end(),
+                    [](double p) { return std::isnan(p); }))
+        return double_vector();
+
     double chisq;
     auto X = gsl_matrix_alloc(dx->size(), DEGREE);
     auto y = gsl_vector_alloc(dx->size());
@@ -94,11 +101,11 @@ build_pipeline(uint8_t ticker, calcgraph::Connectable<double_vector> *curve) {
     auto signal_generator =
         g.node()
             .propagate<calcgraph::OnChange>()
-            .latest(calcgraph::unconnected<double>())
+            .initialize(static_cast<double>(NAN)) // no price initially
             .latest(curve)
             .connect([ticker](double price,
                               double_vector yield_curve) -> TradeSignal {
-                if (!yield_curve || !price) {
+                if (!yield_curve || std::isnan(price)) {
                     return HOLD; // not initialized properly
                 }
 
@@ -215,9 +222,9 @@ int main() {
                             .connect(polyfit);
 
     for (uint8_t benchmark : BENCHMARKS) {
-        calcgraph::Constant<uint8_t>(benchmark)
-            .connect(curve_fitter->variadic_add<0>());
-        dispatcher->connect_keyed(benchmark, curve_fitter->variadic_add<1>());
+        curve_fitter->variadic_add<0>(benchmark);
+        dispatcher->connect_keyed(benchmark,
+                                  curve_fitter->variadic_add<1>(NAN));
 
         dispatcher->connect_keyed(
             benchmark, build_pipeline(benchmark, curve_fitter.get()));
