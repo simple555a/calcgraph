@@ -475,8 +475,8 @@ class GraphTest final : public CppUnit::TestFixture {
 
         // test keyed inputs
         calcgraph::Latest<int> one, two;
-        node->connect_keyed(1, calcgraph::Input<int>(one));
-        node->connect_keyed(2, calcgraph::Input<int>(two));
+        node->keyed_output(1).connect(calcgraph::Input<int>(one));
+        node->keyed_output(2).connect(calcgraph::Input<int>(two));
 
         node->input<0>().append(g, p_intpair(new intpair(1, 5)));
         g(&stats);
@@ -494,7 +494,7 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(two.read() == 9);
 
-        node->disconnect_keyed(2, calcgraph::Input<int>(two));
+        node->keyed_output(2).disconnect(calcgraph::Input<int>(two));
 
         node->input<0>().append(g, p_intpair(new intpair(2, 4)));
         g(&stats);
@@ -543,34 +543,6 @@ class GraphTest final : public CppUnit::TestFixture {
             .output<calcgraph::MultiValued<calcgraph::SingleList>::type>()
             .latest(calcgraph::unconnected<intvector>())
             .connect(intvector_identity);
-    }
-
-    void testOnlyIfUnconnected() {
-        struct calcgraph::Stats stats;
-        calcgraph::Graph g;
-        calcgraph::Accumulate<int> always_send, send_if_connected;
-
-        // setup
-        auto node = g.node()
-                        .latest(calcgraph::unconnected<int>())
-                        .connect(int_identity);
-
-        node->connect(always_send, false);
-        node->connect(always_send, false);
-        node->connect(send_if_connected, true);
-        node->connect(send_if_connected, true);
-
-        node->input<0>().append(g, 7);
-        g(&stats);
-        CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
-        CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
-
-        auto expected_two = always_send.read();
-        CPPUNIT_ASSERT(
-            std::count(expected_two->begin(), expected_two->end(), 7) == 2);
-        auto expected_one = send_if_connected.read();
-        CPPUNIT_ASSERT(
-            std::count(expected_one->begin(), expected_one->end(), 7) == 1);
     }
 
     CPPUNIT_TEST_SUITE(GraphTest);
