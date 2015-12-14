@@ -39,7 +39,7 @@ class GraphTest final : public CppUnit::TestFixture {
                              calcgraph::unconnected<int>());
         node->input<0>().append(g, 1);
         node->input<1>().append(g, 2);
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
@@ -74,7 +74,7 @@ class GraphTest final : public CppUnit::TestFixture {
                         .connect(std::plus<int>());
         node->input<0>().append(g, 1);
         node->input<1>().append(g, 2);
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
@@ -101,7 +101,7 @@ class GraphTest final : public CppUnit::TestFixture {
 
         auto node =
             g.node().initialize(1).initialize(2).connect(std::plus<int>());
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
@@ -125,7 +125,7 @@ class GraphTest final : public CppUnit::TestFixture {
                              calcgraph::unconnected<int>());
         node->input<0>().append(g, 1);
         node->connect(node->input<1>());
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
@@ -169,7 +169,7 @@ class GraphTest final : public CppUnit::TestFixture {
         auto in2 =
             g.node().connect(int_identity, calcgraph::unconnected<int>());
         auto out = g.node().connect(std::less<int>(), in1.get(), in2.get());
-        out->connect(calcgraph::Input<bool>(res));
+        out->connect(res);
 
         in1->input<0>().append(g, 1);
         in2->input<0>().append(g, 2);
@@ -220,17 +220,17 @@ class GraphTest final : public CppUnit::TestFixture {
         auto always = g.node().propagate<calcgraph::Always>().connect(
             int_identity, in.get());
         auto afteralways = g.node().connect(int_identity, always.get());
-        afteralways->connect(calcgraph::Input<int>(always_res));
+        afteralways->connect(always_res);
 
         auto onchange = g.node().propagate<calcgraph::OnChange>().connect(
             int_identity, in.get());
         auto afteronchange = g.node().connect(int_identity, onchange.get());
-        afteronchange->connect(calcgraph::Input<int>(onchange_res));
+        afteronchange->connect(onchange_res);
 
         auto weak = g.node().propagate<calcgraph::Weak>().connect(int_identity,
                                                                   in.get());
         auto afterweak = g.node().connect(int_identity, weak.get());
-        afterweak->connect(calcgraph::Input<int>(weak_res));
+        afterweak->connect(weak_res);
 
         in->input<0>().append(g, 1);
         g(&stats);
@@ -280,7 +280,7 @@ class GraphTest final : public CppUnit::TestFixture {
                          }, calcgraph::unconnected<int>());
         auto sizer = g.node().connect([](intvector arr) { return arr->size(); },
                                       adder.get());
-        sizer->connect(calcgraph::Input<std::size_t>(res));
+        sizer->connect(res);
 
         adder->input<1>().append(g, 1);
         g(&stats);
@@ -315,7 +315,7 @@ class GraphTest final : public CppUnit::TestFixture {
                              calcgraph::unconnected<int>());
         node->input<0>().append(g, 1);
         node->input<1>().append(g, 2);
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         // ... wait for calculation
         std::this_thread::yield();
@@ -343,7 +343,7 @@ class GraphTest final : public CppUnit::TestFixture {
         auto node =
             g.node().connect(int_identity, calcgraph::unconnected<int>());
         node->input<0>().append(g, 1);
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
@@ -357,7 +357,7 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(res.read() == 3);
 
-        node->disconnect(calcgraph::Input<int>(res));
+        node->disconnect(res);
 
         // update an input, again
         node->input<0>().append(g, 5);
@@ -377,7 +377,7 @@ class GraphTest final : public CppUnit::TestFixture {
                        .accumulate(calcgraph::unconnected<int>())
                        .connect(intlist_identity);
         acc->input<0>().append(g, 3);
-        acc->connect(calcgraph::Input<intlist>(res));
+        acc->connect(res);
 
         g(&stats);
         CPPUNIT_ASSERT_MESSAGE(stats, stats.queued == 1);
@@ -409,7 +409,7 @@ class GraphTest final : public CppUnit::TestFixture {
         auto var = g.node().variadic<int>().connect(intvector_identity);
         auto one = var->variadic_add<0>();
         auto two = var->variadic_add<0>();
-        var->connect(calcgraph::Input<intvector>(res));
+        var->connect(res);
 
         one.append(g, 5);
         two.append(g, 7);
@@ -453,7 +453,7 @@ class GraphTest final : public CppUnit::TestFixture {
                         .output<calcgraph::Multiplexed>()
                         .latest(calcgraph::unconnected<p_intpair>())
                         .connect([](p_intpair a) { return *a; });
-        node->connect(calcgraph::Input<p_intpair>(res));
+        node->connect(res);
 
         // test un-keyed inputs
 
@@ -475,8 +475,8 @@ class GraphTest final : public CppUnit::TestFixture {
 
         // test keyed inputs
         calcgraph::Latest<int> one, two;
-        node->keyed_output(1).connect(calcgraph::Input<int>(one));
-        node->keyed_output(2).connect(calcgraph::Input<int>(two));
+        node->keyed_output(1).connect(one);
+        node->keyed_output(2).connect(two);
 
         node->input<0>().append(g, p_intpair(new intpair(1, 5)));
         g(&stats);
@@ -494,7 +494,7 @@ class GraphTest final : public CppUnit::TestFixture {
         CPPUNIT_ASSERT_MESSAGE(stats, stats.worked == 1);
         CPPUNIT_ASSERT(two.read() == 9);
 
-        node->keyed_output(2).disconnect(calcgraph::Input<int>(two));
+        node->keyed_output(2).disconnect(two);
 
         node->input<0>().append(g, p_intpair(new intpair(2, 4)));
         g(&stats);
@@ -514,7 +514,7 @@ class GraphTest final : public CppUnit::TestFixture {
                 .output<calcgraph::MultiValued<calcgraph::SingleList>::type>()
                 .latest(calcgraph::unconnected<intvector>())
                 .connect(intvector_identity);
-        node->connect(calcgraph::Input<int>(res));
+        node->connect(res);
 
         node->input<0>().append(g, intvector(new std::vector<int>({3, 5, 7})));
         g(&stats);

@@ -47,6 +47,23 @@ namespace calcgraph {
         virtual void store(VAL v) = 0;
     };
 
+    template <typename VAL>
+    std::shared_ptr<Storeable<VAL>> wrap(std::function<void(VAL)> fn) {
+        class StoreableFunction : public Storeable<VAL> {
+          public:
+            void store(VAL v) { fn(v); }
+
+            StoreableFunction(const std::function<void(VAL)> &&fn) noexcept
+                : fn(fn) {}
+            StoreableFunction(const StoreableFunction &other) = delete;
+
+          private:
+            const std::function<void(VAL)> fn;
+        };
+        return std::shared_ptr<Storeable<VAL>>(
+            new StoreableFunction(std::move(fn)));
+    }
+
     /**
      * @brief An input policy that returns the latest value of the Input to the
      * Node to use when its eval() method is called.
@@ -357,18 +374,6 @@ namespace calcgraph {
     };
 
     /**
-     * @brief A propagation policy that never recalculates downstream
-     * dependencies
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct Never final {
-        inline constexpr bool push_value(RET) { return false; }
-        inline constexpr bool notify() const { return true; }
-    };
-
-    /**
      * @brief A propagation policy that recalculates downstream dependencies
      * only if the Node's output changes (according to the != operator)
      * @details This method isn't thread-safe, but doesn't need to be as it's
@@ -400,9 +405,9 @@ namespace calcgraph {
         inline bool push_value(std::shared_ptr<RET> latest) {
             auto previous = last.exchange(latest);
             if (latest && previous)
-                return *latest == *previous;
+                return *latest != *previous;
             else
-                return latest == previous;
+                return latest != previous;
         }
 
       private:
@@ -736,6 +741,13 @@ namespace calcgraph {
     /**
      * @brief An output policy that passes values to different Inputs
      *depending on part of the value (the key, i.e. what std::get<0> returns).
+     * @details Use the keyed_output function to get a Connectable for the given
+     *key. Any key-value pairs passed to this Multiplexed instance for keys that
+     *haven't been passed (so far) to keyed_output will be passed as std::pairs
+     *to the default output. Note that all values for these "unmatched" keys
+     *will be sent, so even if you use this functionality to build parts of the
+     *calculation graph to deal with new keys you won't miss values sent while
+     *this node is being eval()'ed.
      *
      * @tparam RET A templatized std::pair, where the left side is the key
      *and the right side is the value to be passed to downstream nodes.
@@ -755,12 +767,11 @@ namespace calcgraph {
         inline void connect(Input<output_type> a) { unkeyed.connect(a); }
 
         inline void disconnect(Input<output_type> a) { unkeyed.disconnect(a); }
-
         inline void propagate(RET &&val, WorkState &ws) {
             auto found = keyed.find(val.first);
             if (found == keyed.end()) {
                 // pass the whole thing to the unkeyed output
-                output_type on_heap = std::shared_ptr<RET>(new RET(val));
+                output_type on_heap(new RET(val));
                 unkeyed.propagate(std::move(on_heap), ws);
             } else {
                 found->second.propagate(std::move(val.second), ws);
@@ -797,10 +808,8 @@ namespace calcgraph {
         uint16_t worked;
         /**
          * @brief how many Nodes were added to this evaluation's heap
-         * multiple
-         * times (as they were dependent on more than one queued or
-         * dependent
-         * Node)
+         * multiple times (as they were dependent on more than one queued or
+         * dependent Node)
          */
         uint16_t duplicates;
         /**
@@ -810,8 +819,7 @@ namespace calcgraph {
         uint16_t pushed_graph;
         /**
          * @brief how many dependencies were pushed onto this evaluation's
-         * work
-         * heap to be evaluated in topological order
+         * work heap to be evaluated in topological order
          */
         uint16_t pushed_heap;
 
@@ -943,6 +951,8 @@ namespace calcgraph {
             }
         }
 
+        Input(std::shared_ptr<Storeable<INPUT>> in) noexcept : in(in.get()) {}
+        Input(Storeable<INPUT> *in) noexcept : in(in) {}
         Input(Storeable<INPUT> &in) noexcept : in(&in) {}
         Input(const Input &other) noexcept : in(other.in), ref(other.ref) {}
         Input(Input &&other) noexcept : in(std::move(other.in)),
@@ -998,6 +1008,7 @@ namespace calcgraph {
      *results to any connected Inputs.
      * @details The key part of the calculation graph - constructed using a
      * NodeBuilder obtained from Graph.node().
+     * @todo This class doesn't support FN functions with a void return type.
      *
      * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange),
      *used to decide whether to notify connected Inputs after the FN function is

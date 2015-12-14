@@ -19,6 +19,7 @@ using uint8double_vector =
     std::shared_ptr<std::vector<std::pair<uint8_t, double>>>;
 using string = std::shared_ptr<std::string>;
 using strings = std::shared_ptr<std::forward_list<string>>;
+using ticker_price_pair = std::shared_ptr<std::pair<uint8_t, double>>;
 
 /**
  * @brief Polyfit quadratic functions
@@ -63,9 +64,11 @@ enum TradeSignal { BUY, SELL, HOLD };
 double_vector polyfit(const uint8_vector dx, const double_vector dy) {
 
     // can't fit NaN prices
-    if (std::any_of(dy->begin(), dy->end(),
-                    [](double p) { return std::isnan(p); }))
-        return double_vector();
+    if (!dx->size() || dx->size() != dy->size() ||
+        std::any_of(dy->begin(), dy->end(),
+                    [](double p) { return std::isnan(p); })) {
+        return double_vector(); // not enough pieces
+    }
 
     double chisq;
     auto X = gsl_matrix_alloc(dx->size(), DEGREE);
@@ -83,7 +86,7 @@ double_vector polyfit(const uint8_vector dx, const double_vector dy) {
     auto ws = gsl_multifit_linear_alloc(dx->size(), DEGREE);
     gsl_multifit_linear(X, y, c, cov, &chisq, ws);
 
-    double_vector out = double_vector(new std::vector<double>(DEGREE));
+    double_vector out = double_vector(new std::vector<double>());
     for (int i = 0; i < DEGREE; i++) {
         out->push_back(gsl_vector_get(c, i));
     }
@@ -93,18 +96,21 @@ double_vector polyfit(const uint8_vector dx, const double_vector dy) {
     gsl_matrix_free(cov);
     gsl_vector_free(y);
     gsl_vector_free(c);
+
     return out;
 }
 
-calcgraph::Input<double>
-build_pipeline(uint8_t ticker, calcgraph::Connectable<double_vector> *curve) {
+void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
+                    calcgraph::Connectable<double_vector> *curve,
+                    double initial_price) {
     auto signal_generator =
         g.node()
             .propagate<calcgraph::OnChange>()
-            .initialize(static_cast<double>(NAN)) // no price initially
+            .latest(&price, initial_price)
             .latest(curve)
             .connect([ticker](double price,
                               double_vector yield_curve) -> TradeSignal {
+
                 if (!yield_curve || std::isnan(price)) {
                     return HOLD; // not initialized properly
                 }
@@ -127,8 +133,6 @@ build_pipeline(uint8_t ticker, calcgraph::Connectable<double_vector> *curve) {
                 else
                     return HOLD;
             });
-
-    return signal_generator->input<0>();
 }
 
 uint8double_vector dispatch(strings msgs) {
@@ -181,7 +185,7 @@ bool listen_to_datagrams(calcgraph::Input<string> &&in) {
     while (!stop.load()) {
         if ((byterecv = recvmsg(fd, &msg, 0)) < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK ||
-                errno == EINPROGRESS) {
+                errno == EINPROGRESS || errno == EINTR) {
                 continue; // probably timeout
             } else {
                 perror("recvmsg");
@@ -223,27 +227,18 @@ int main() {
 
     for (uint8_t benchmark : BENCHMARKS) {
         curve_fitter->variadic_add<0>(benchmark);
-        dispatcher->connect_keyed(benchmark,
-                                  curve_fitter->variadic_add<1>(NAN));
-
-        dispatcher->connect_keyed(
-            benchmark, build_pipeline(benchmark, curve_fitter.get()));
+        auto price = dispatcher->keyed_output(benchmark);
+        price.connect(curve_fitter->variadic_add<1>(NAN));
+        build_pipeline(benchmark, price, curve_fitter.get(), NAN);
     }
 
-    auto builder =
-        g.node()
-            .accumulate(dispatcher.get())
-            .initialize(dispatcher)
-            .initialize(curve_fitter)
-            .connect([](auto new_tickers, auto dispatcher, auto curve_fitter) {
-                for (auto new_ticker : *new_tickers) {
-                    auto input =
-                        build_pipeline(new_ticker->first, curve_fitter.get());
-                    dispatcher->connect_keyed(new_ticker->first, input, true);
-                    input.append(g, new_ticker->second); // always pass on
-                }
-                return nullptr;
-            });
+    auto b = calcgraph::wrap<ticker_price_pair>(
+        [&dispatcher, &curve_fitter](ticker_price_pair new_pair) {
+            auto price = dispatcher->keyed_output(new_pair->first);
+            build_pipeline(new_pair->first, price, curve_fitter.get(),
+                           new_pair->second);
+        });
+    dispatcher->connect(b);
 
     if (!listen_to_datagrams(dispatcher->input<0>())) {
         stop.store(true);
