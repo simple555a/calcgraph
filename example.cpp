@@ -13,6 +13,33 @@
 
 #include "calcgraph.h"
 
+enum TradeSignal { BUY, SELL, HOLD };
+static const char *TradeSignalNames[] = {"BUY", "SELL", "HOLD"};
+
+struct Order final {
+    const uint8_t ticker;
+    const TradeSignal type;
+    const double price;
+
+    Order(uint8_t ticker, TradeSignal type, double price)
+        : ticker(ticker), type(type), price(price) {
+        printf("opening %s @ %0.3f on %dY", TradeSignalNames[type], price,
+               ticker);
+    }
+
+    void close(double current_price) {
+        double pnl;
+        if (type == BUY) {
+            pnl = current_price - price;
+        } else {
+            pnl = price - current_price;
+        }
+
+        printf("closing %s @ %0.3f on %dY at %0.3f, P&L %0.3f\n",
+               TradeSignalNames[type], price, ticker, current_price, pnl);
+    }
+};
+
 using uint8_vector = std::shared_ptr<std::vector<uint8_t>>;
 using double_vector = std::shared_ptr<std::vector<double>>;
 using uint8double_vector =
@@ -20,6 +47,7 @@ using uint8double_vector =
 using string = std::shared_ptr<std::string>;
 using strings = std::shared_ptr<std::forward_list<string>>;
 using ticker_price_pair = std::shared_ptr<std::pair<uint8_t, double>>;
+using order = std::shared_ptr<Order>;
 
 /**
  * @brief Polyfit quadratic functions
@@ -45,7 +73,7 @@ static const int buffer_len = 4096;
  * The "benchmark" maturities, or instruments we'll consider when building (via
  * polyfit) the yield curve.
  */
-static std::set<uint8_t> BENCHMARKS = {1, 3, 5, 10};
+static std::set<uint8_t> BENCHMARKS = {1, 5, 10};
 
 static calcgraph::Graph g;
 
@@ -54,8 +82,6 @@ static calcgraph::Graph g;
  * trigger a "buy" or "sell" signal
  */
 static const double THRESHOLD = 0.01;
-
-enum TradeSignal { BUY, SELL, HOLD };
 
 /**
  * @brief Polynomial curve fitting on 2D data
@@ -121,8 +147,6 @@ void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
                 for (uint8_t i = 0; i < DEGREE; ++i) {
                     fair_value += pow(ticker, i) * yield_curve->at(i);
                 }
-                printf("price %0.2f vs FV %0.2f for %dY\n", price, fair_value,
-                       ticker);
 
                 // if the market price deviates from the model price by more
                 // than a THRESHOLD amount, generate a trading signal
@@ -133,6 +157,33 @@ void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
                 else
                     return HOLD;
             });
+
+    auto order_manager =
+        g.node()
+            .propagate<calcgraph::Weak>() // so we don't wake ourselves up
+            .latest(&price, initial_price)
+            .latest(signal_generator.get(), HOLD)
+            .unconnected<std::shared_ptr<Order>>()
+            .connect([ticker](double price, TradeSignal sig, order current) {
+                switch (sig) {
+                case HOLD:
+                    if (current) {
+                        current->close(price);
+                    }
+                    return order();
+                case BUY:
+                case SELL:
+                    if (current) {
+                        if (current->type == sig) {
+                            return current; // keep holding
+                        } else {
+                            current->close(price);
+                        }
+                    }
+                    return order(new Order(ticker, sig, price));
+                }
+            });
+    order_manager->connect(order_manager->input<2>());
 }
 
 uint8double_vector dispatch(strings msgs) {
@@ -163,7 +214,8 @@ bool listen_to_datagrams(calcgraph::Input<string> &&in) {
         return false;
     }
 
-    // set up a timeout so we check the "stop" flag once a second (to break out
+    // set up a timeout so we check the "stop" flag once a second (to break
+    // out
     // of the receive loop)
     struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
@@ -201,7 +253,7 @@ bool listen_to_datagrams(calcgraph::Input<string> &&in) {
 }
 
 void install_sigint_handler() {
-    signal(SIGINT, [](int signum) {
+    signal(SIGINT, [](int) {
         stop.store(true);
         std::cerr << "SIGINT, exiting" << std::endl;
     });

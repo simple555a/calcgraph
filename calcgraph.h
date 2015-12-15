@@ -1286,8 +1286,20 @@ namespace calcgraph {
          */
         template <typename VAL>
         auto initialize(VAL initial) {
-            return doconnect<Latest, VAL>(unconnected<VAL>(),
-                                          std::move(initial));
+            return doconnect<Latest, VAL>(
+                static_cast<Connectable<VAL> *>(nullptr), std::move(initial));
+        }
+
+        /**
+         * @brief Add an argument with a Latest input policy and the default
+         * initial value
+         * @details Useful for having a placeholder Input that you'll connect
+         * later.
+         */
+        template <typename VAL>
+        auto unconnected() {
+            return doconnect<Latest, VAL>(
+                static_cast<Connectable<VAL> *>(nullptr));
         }
 
         /**
@@ -1295,7 +1307,8 @@ namespace calcgraph {
          */
         template <typename VAL>
         auto variadic() {
-            return doconnect<Variadic, VAL>(unconnected<std::nullptr_t>());
+            return doconnect<Variadic, VAL>(
+                static_cast<Connectable<std::nullptr_t> *>(nullptr));
         }
 
         /**
