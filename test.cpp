@@ -537,12 +537,44 @@ class GraphTest final : public CppUnit::TestFixture {
      * @brief Check the Node scheduled on the work queue is cleaned up by the
      * Graph's destructor
      */
-    void testMemoryLeak() {
+    void testMemoryLeakWorkQueue() {
         calcgraph::Graph g;
         g.node()
             .output<calcgraph::MultiValued<calcgraph::SingleList>::type>()
             .latest(calcgraph::unconnected<intvector>())
             .connect(intvector_identity);
+    }
+
+    struct RefCounted {
+        uint8_t refcount;
+        friend inline void intrusive_ptr_add_ref(RefCounted *w) {
+            ++w->refcount;
+        }
+        friend inline void intrusive_ptr_release(RefCounted *w) {
+            if (--w->refcount == 0u) {
+                delete w;
+            }
+        }
+    };
+
+    void testMemoryLeakLatestIntrusive() {
+        boost::intrusive_ptr<RefCounted> a(new RefCounted{}),
+            b(new RefCounted{}), c(new RefCounted{}), d(new RefCounted{});
+        calcgraph::Latest<boost::intrusive_ptr<RefCounted>> res(a);
+
+        res.store(b);
+        res.store(c);
+        res.exchange(d);
+    }
+
+    void testMemoryLeakLatestShared() {
+        std::shared_ptr<RefCounted> a(new RefCounted{}), b(new RefCounted{}),
+            c(new RefCounted{}), d(new RefCounted{});
+        calcgraph::Latest<std::shared_ptr<RefCounted>> res(a);
+
+        res.store(b);
+        res.store(c);
+        res.exchange(d);
     }
 
     void testEmbedSingle() {
@@ -624,9 +656,11 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testVariadic);
     CPPUNIT_TEST(testMultiplexed);
     CPPUNIT_TEST(testMultiValued);
-    CPPUNIT_TEST(testMemoryLeak);
+    CPPUNIT_TEST(testMemoryLeakWorkQueue);
     CPPUNIT_TEST(testEmbedSingle);
     CPPUNIT_TEST(testEmbedMulti);
+    CPPUNIT_TEST(testMemoryLeakLatestIntrusive);
+    CPPUNIT_TEST(testMemoryLeakLatestShared);
     CPPUNIT_TEST_SUITE_END();
 };
 

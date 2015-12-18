@@ -161,8 +161,17 @@ namespace calcgraph {
                 val.exchange(other.detach(), std::memory_order_acq_rel), false);
         }
 
-        Latest(input_type initial = {}) noexcept { store(initial); }
+        Latest(input_type initial = {}) noexcept : val() { store(initial); }
         Latest(const Latest &other) = delete;
+
+        /**
+         * @brief Ensures we decrement the reference count of the object we've
+         * got stored so we don't leak it.
+         */
+        ~Latest() {
+            boost::intrusive_ptr<VAL>(val.load(std::memory_order_acquire),
+                                      false);
+        }
 
       private:
         std::atomic<VAL *> val;
