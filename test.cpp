@@ -545,6 +545,71 @@ class GraphTest final : public CppUnit::TestFixture {
             .connect(intvector_identity);
     }
 
+    void testEmbedSingle() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        std::atomic<int> res1(0);
+        calcgraph::Latest<int> res2;
+
+        // setup
+        auto node = g.node().unconnected<int>().connect(int_identity);
+        node->input<0>().append(g, 3);
+        auto embedded = node->embed([&res1, &res2](int i, auto &output) {
+            res1.store(i);
+            output.connect(res2);
+        });
+
+        g(&stats);
+        CPPUNIT_ASSERT(res1.load() == 3);
+        CPPUNIT_ASSERT(
+            res2.read() ==
+            3); // res2 connected after embedded, so gets passed the value
+
+        node->input<0>().append(g, 5);
+        g(&stats);
+        CPPUNIT_ASSERT(res1.load() == 5);
+        CPPUNIT_ASSERT(res2.read() == 5); // now connected
+
+        node->disconnect(embedded);
+        node->input<0>().append(g, 7);
+        g(&stats);
+        CPPUNIT_ASSERT(res1.load() == 5); // not connected
+        CPPUNIT_ASSERT(res2.read() == 7); // still connected
+    }
+
+    void testEmbedMulti() {
+        struct calcgraph::Stats stats;
+        calcgraph::Graph g;
+        std::atomic<int> res1(0);
+        calcgraph::Latest<int> res2;
+
+        // setup
+        auto node = g.node()
+                        .output<calcgraph::Multiplexed>()
+                        .latest(calcgraph::unconnected<p_intpair>())
+                        .connect([](p_intpair a) { return *a; });
+        node->input<0>().append(g, p_intpair(new intpair(5, 7)));
+        auto embedded = node->embed([&res1, &res2](p_intpair i, auto &output) {
+            res1.store(i->second);
+            output.keyed_output(4).connect(res2);
+        });
+
+        g(&stats);
+        CPPUNIT_ASSERT(res1.load() == 7);
+        CPPUNIT_ASSERT(res2.read() == 0);
+
+        node->input<0>().append(g, p_intpair(new intpair(4, 3)));
+        g(&stats);
+        CPPUNIT_ASSERT(res1.load() == 7); // not passed to unkeyed
+        CPPUNIT_ASSERT(res2.read() == 3); // now connected
+
+        node->disconnect(embedded);
+        node->input<0>().append(g, p_intpair(new intpair(4, 1)));
+        g(&stats);
+        CPPUNIT_ASSERT(res1.load() == 7); // not connected
+        CPPUNIT_ASSERT(res2.read() == 1); // still connected
+    }
+
     CPPUNIT_TEST_SUITE(GraphTest);
     CPPUNIT_TEST(testAsserts);
     CPPUNIT_TEST(testSingleNode);
@@ -560,6 +625,8 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testMultiplexed);
     CPPUNIT_TEST(testMultiValued);
     CPPUNIT_TEST(testMemoryLeak);
+    CPPUNIT_TEST(testEmbedSingle);
+    CPPUNIT_TEST(testEmbedMulti);
     CPPUNIT_TEST_SUITE_END();
 };
 

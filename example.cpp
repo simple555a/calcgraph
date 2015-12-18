@@ -284,13 +284,14 @@ int main() {
         build_pipeline(benchmark, price, curve_fitter.get(), NAN);
     }
 
-    auto b = calcgraph::wrap<ticker_price_pair>(
-        [&dispatcher, &curve_fitter](ticker_price_pair new_pair) {
-            auto price = dispatcher->keyed_output(new_pair->first);
+    dispatcher->embed(
+        [&curve_fitter](ticker_price_pair new_pair,
+                        calcgraph::MultiValued<calcgraph::Multiplexed>::type<
+                            calcgraph::OnChange, uint8double_vector> &output) {
+            auto price = output.keyed_output(new_pair->first);
             build_pipeline(new_pair->first, price, curve_fitter.get(),
                            new_pair->second);
         });
-    dispatcher->connect(b);
 
     if (!listen_to_datagrams(dispatcher->input<0>())) {
         stop.store(true);

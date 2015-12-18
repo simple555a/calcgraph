@@ -47,23 +47,6 @@ namespace calcgraph {
         virtual void store(VAL v) = 0;
     };
 
-    template <typename VAL>
-    std::shared_ptr<Storeable<VAL>> wrap(std::function<void(VAL)> fn) {
-        class StoreableFunction : public Storeable<VAL> {
-          public:
-            void store(VAL v) { fn(v); }
-
-            StoreableFunction(const std::function<void(VAL)> &&fn) noexcept
-                : fn(fn) {}
-            StoreableFunction(const StoreableFunction &other) = delete;
-
-          private:
-            const std::function<void(VAL)> fn;
-        };
-        return std::shared_ptr<Storeable<VAL>>(
-            new StoreableFunction(std::move(fn)));
-    }
-
     /**
      * @brief An input policy that returns the latest value of the Input to the
      * Node to use when its eval() method is called.
@@ -361,213 +344,17 @@ namespace calcgraph {
         WorkState(Graph &g, struct Stats *stats) : g(g), stats(stats) {}
     };
 
-    /**
-     * @brief A propagation policy that always recalculates downstream
-     * dependencies
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct Always final {
-        inline constexpr bool push_value(RET) { return true; }
-        inline constexpr bool notify() const { return true; }
-    };
-
-    /**
-     * @brief A propagation policy that recalculates downstream dependencies
-     * only if the Node's output changes (according to the != operator)
-     * @details This method isn't thread-safe, but doesn't need to be as it's
-     * only called by Node.eval() when the calculation lock is held. This policy
-     * stores the last output value in the Node, so increases the size of the
-     * templated Node class and potentially uses even more memory (e.g. if the
-     * output is a std::shared_ptr to a large object).
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct OnChange final {
-        inline constexpr bool notify() const { return true; }
-        inline bool push_value(RET latest) {
-            return last.exchange(latest) != latest;
-        }
-
-      private:
-        Latest<RET> last;
-    };
-
-    /**
-     * @brief A specialization of OnChange for std::shared_ptrs that compares
-     * what the pointers point at
-     */
-    template <typename RET>
-    struct OnChange<std::shared_ptr<RET>> final {
-        inline constexpr bool notify() const { return true; }
-        inline bool push_value(std::shared_ptr<RET> latest) {
-            auto previous = last.exchange(latest);
-            if (latest && previous)
-                return *latest != *previous;
-            else
-                return latest != previous;
-        }
-
-      private:
-        Latest<std::shared_ptr<RET>> last;
-    };
-
-    /**
-     * @brief A propagation policy that passes on values but doesn't schedule
-     * downstream Work items to be calculated
-     * @details Useful for circular references
-     * @tparam RET The type of the values calcuated by the Node this policy
-     * applies to
-     */
-    template <typename RET>
-    struct Weak final {
-        inline constexpr bool notify() const { return false; }
-        inline constexpr bool push_value(RET latest) { return true; }
-    };
-
-    /**
-     * @brief A concept for "something you can connect an Input to"
-     * @tparam RET The type of the values consumed (and so the type of values
-     * the Input should provide)
-     */
-    template <typename RET>
-    class Connectable {
-      public:
-        /**
-         * @brief Connect the given Input to this object.
-         * @details Must be thread-safe and can be called multiple times on any
-         * given object.
-         */
-        virtual void connect(Input<RET>) = 0;
-
-        /**
-         * @brief Disconnects the given Input from this object.
-         * @details Must be thread-safe and has no effect if the given Input
-         * wasn't already connected
-         */
-        virtual void disconnect(Input<RET>) = 0;
-    };
-
-    template <template <typename> class PROPAGATE, typename RET>
-    class SingleList final : public Connectable<RET> {
-      public:
-        using output_type = RET;
-        using key_type = std::nullptr_t;
-        using value_type = std::nullptr_t;
-
-        inline void connect(Input<output_type> a) override {
-            dependents.push_back(a);
-        }
-
-        inline void disconnect(Input<output_type> a) override {
-            auto it = std::find(dependents.begin(), dependents.end(), a);
-            if (it != dependents.end()) {
-                // slightly less shuffling
-                std::swap(*it, dependents.back());
-                dependents.pop_back();
-            }
-        }
-
-        inline void propagate(RET &&val, WorkState &ws) {
-            if (!propagation_policy.push_value(val))
-                return;
-
-            for (auto &&dependent : dependents) {
-                dependent.in->store(val);
-                if (propagation_policy.notify() && dependent.ref) {
-                    ws.add_to_queue(*dependent.ref);
-                }
-            }
-        }
-
-        SingleList() noexcept : dependents(), propagation_policy() {}
-
-      private:
-        /**
-         * @brief Downstream dependencies
-         * @details Not threadsafe so controlled by the Work.next LSB
-         * locking
-         * mechanism
-         */
-        std::vector<Input<output_type>> dependents;
-
-        /**
-         * @brief The propagation policy to use for these inputs
-         */
-        PROPAGATE<RET> propagation_policy;
-    };
-
-    template <template <template <typename> class, typename> class OUTPUT>
-    struct MultiValued final {
-        template <template <typename> class PROPAGATE, typename RET>
-        class type final
-            : public Connectable<typename OUTPUT<
-                  PROPAGATE,
-                  typename RET::element_type::value_type>::output_type> {
-          private:
-            using single_type = typename RET::element_type::value_type;
-
-          public:
-            using output_type =
-                typename OUTPUT<PROPAGATE, single_type>::output_type;
-            using key_type = typename OUTPUT<PROPAGATE, single_type>::key_type;
-            using value_type =
-                typename OUTPUT<PROPAGATE, single_type>::value_type;
-
-            inline void connect(Input<output_type> a) { output.connect(a); }
-
-            inline void disconnect(Input<output_type> a) {
-                output.disconnect(a);
-            }
-
-            inline void propagate(RET &&val, WorkState &ws) {
-                for (auto i = val->begin(); i != val->end(); i++) {
-                    output.propagate(std::move(*i), ws);
-                }
-            }
-
-            inline KeyedOutput<value_type>
-            keyed_output(key_type key, boost::intrusive_ptr<Work> ref) {
-                return output.keyed_output(key, ref);
-            }
-
-          private:
-            OUTPUT<PROPAGATE, single_type> output;
-        };
-    };
-
-    /**
-     * @brief A helper for NodeBuilder.connect, to indicate that the given
-     * Input
-     * shouldn't be connected to anything.
-     * @return An appropriately-cast nullptr that can be passed to connect
-     * or
-     * NodeBuilder.connect
-     */
-    template <typename RET>
-    inline Connectable<RET> *unconnected() {
-        return static_cast<Connectable<RET> *>(nullptr);
-    }
-
-    /**
-     * @brief Connects the Input to the target Connectable
-     * @param to The (possibly-nullptr) Connectable to add this input to
-     * @param from A non-nullptr Input to connect
-     * @tparam RET the type of the Input and target
-     */
-    template <typename RET>
-    inline void connect(Connectable<RET> *to, Input<RET> from) {
-        if (to)
-            to->connect(from);
-    }
-
     namespace flags {
         /**
          * @brief The lock bit in a Work's next pointer.
          */
         static const std::uintptr_t LOCK = 1;
+
+        /**
+         * A magic value for a Work's id field that means it won't ever get
+         * scheduled for evaluation.
+         */
+        static const uint32_t DONT_SCHEDULE = 0;
     }
 
     /**
@@ -689,6 +476,256 @@ namespace calcgraph {
         }
     };
 
+    /**
+     * @brief A propagation policy that always recalculates downstream
+     * dependencies
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Always final {
+        inline constexpr bool push_value(RET) { return true; }
+        inline constexpr bool notify() const { return true; }
+    };
+
+    /**
+     * @brief A propagation policy that recalculates downstream dependencies
+     * only if the Node's output changes (according to the != operator)
+     * @details This method isn't thread-safe, but doesn't need to be as it's
+     * only called by Node.eval() when the calculation lock is held. This policy
+     * stores the last output value in the Node, so increases the size of the
+     * templated Node class and potentially uses even more memory (e.g. if the
+     * output is a std::shared_ptr to a large object).
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct OnChange final {
+        inline constexpr bool notify() const { return true; }
+        inline bool push_value(RET latest) {
+            return last.exchange(latest) != latest;
+        }
+
+      private:
+        Latest<RET> last;
+    };
+
+    /**
+     * @brief A specialization of OnChange for std::shared_ptrs that compares
+     * what the pointers point at
+     */
+    template <typename RET>
+    struct OnChange<std::shared_ptr<RET>> final {
+        inline constexpr bool notify() const { return true; }
+        inline bool push_value(std::shared_ptr<RET> latest) {
+            auto previous = last.exchange(latest);
+            if (latest && previous)
+                return *latest != *previous;
+            else
+                return latest != previous;
+        }
+
+      private:
+        Latest<std::shared_ptr<RET>> last;
+    };
+
+    /**
+     * @brief A propagation policy that passes on values but doesn't schedule
+     * downstream Work items to be calculated
+     * @details Useful for circular references
+     * @tparam RET The type of the values calcuated by the Node this policy
+     * applies to
+     */
+    template <typename RET>
+    struct Weak final {
+        inline constexpr bool notify() const { return false; }
+        inline constexpr bool push_value(RET latest) { return true; }
+    };
+
+    /**
+     * @brief A concept for "something you can connect an Input to"
+     * @tparam RET The type of the values consumed (and so the type of values
+     * the Input should provide)
+     */
+    template <typename RET>
+    class Connectable {
+      public:
+        /**
+         * @brief Connect the given Input to this object.
+         * @details Must be thread-safe and can be called multiple times on any
+         * given object.
+         */
+        virtual void connect(Input<RET>) = 0;
+
+        /**
+         * @brief Disconnects the given Input from this object.
+         * @details Must be thread-safe and has no effect if the given Input
+         * wasn't already connected
+         */
+        virtual void disconnect(Input<RET>) = 0;
+
+        virtual ~Connectable() {}
+    };
+
+    template <typename RET>
+    class KeyedConnectable : public Connectable<std::shared_ptr<RET>> {
+      public:
+        virtual Connectable<typename RET::second_type> &
+            keyed_output(typename RET::first_type) = 0;
+
+        virtual ~KeyedConnectable() {}
+    };
+
+    template <template <typename> class PROPAGATE, typename RET>
+    class SingleList final : public Connectable<RET> {
+      public:
+        using output_type = RET;
+        using key_type = std::nullptr_t;
+        using value_type = std::nullptr_t;
+        using interface_type = Connectable<output_type>;
+
+      private:
+        using embed_type =
+            const std::function<void(output_type, interface_type &)>;
+
+      public:
+        inline void connect(Input<output_type> a) override {
+            dependents.push_back(a);
+        }
+
+        inline void disconnect(Input<output_type> a) override {
+            auto it = std::find(dependents.begin(), dependents.end(), a);
+            if (it != dependents.end()) {
+                // slightly less shuffling
+                std::swap(*it, dependents.back());
+                dependents.pop_back();
+            }
+        }
+
+        inline void propagate(RET &&val, WorkState &ws) {
+            if (!propagation_policy.push_value(val))
+                return;
+
+            // accessing i by index as embedded Inputs may modify the list,
+            // invalidating any iterators
+            for (std::size_t i = 0; i < dependents.size(); ++i) {
+                dependents[i].in->store(val);
+                if (propagation_policy.notify() && dependents[i].ref) {
+                    ws.add_to_queue(*dependents[i].ref);
+                }
+            }
+        }
+
+        inline Input<output_type> embed(embed_type &&fn, Work *ref) {
+            class Embed final : public Storeable<output_type>, public Work {
+
+                embed_type fn;
+                interface_type *output;
+
+                Embed(embed_type &&fn, interface_type *output) noexcept
+                    : fn(fn),
+                      output(output),
+                      Work(flags::DONT_SCHEDULE) {}
+                Embed(const Embed &other) = delete;
+                friend class SingleList<PROPAGATE, RET>;
+
+              public:
+                inline void store(output_type v) { fn(v, *output); }
+                void eval(WorkState &) { std::abort(); }
+            };
+            auto ret = new Embed(std::move(fn), this);
+            return Input<output_type>(*ret, ret);
+        }
+
+        SingleList() noexcept : dependents(), propagation_policy() {}
+
+      private:
+        /**
+         * @brief Downstream dependencies
+         * @details Not threadsafe so controlled by the Work.next LSB
+         * locking
+         * mechanism
+         */
+        std::vector<Input<output_type>> dependents;
+
+        /**
+         * @brief The propagation policy to use for these inputs
+         */
+        PROPAGATE<RET> propagation_policy;
+    };
+
+    template <template <template <typename> class, typename> class OUTPUT>
+    struct MultiValued final {
+        template <template <typename> class PROPAGATE, typename RET>
+        class type final
+            : public Connectable<typename OUTPUT<
+                  PROPAGATE,
+                  typename RET::element_type::value_type>::output_type> {
+          private:
+            using single_type = typename RET::element_type::value_type;
+
+          public:
+            using output_type =
+                typename OUTPUT<PROPAGATE, single_type>::output_type;
+            using key_type = typename OUTPUT<PROPAGATE, single_type>::key_type;
+            using value_type =
+                typename OUTPUT<PROPAGATE, single_type>::value_type;
+            using interface_type =
+                typename OUTPUT<PROPAGATE, single_type>::interface_type;
+
+            inline void connect(Input<output_type> a) { output.connect(a); }
+
+            inline void disconnect(Input<output_type> a) {
+                output.disconnect(a);
+            }
+
+            inline void propagate(RET &&val, WorkState &ws) {
+                for (auto i = val->begin(); i != val->end(); i++) {
+                    output.propagate(std::move(*i), ws);
+                }
+            }
+
+            inline KeyedOutput<value_type>
+            keyed_output(key_type key, boost::intrusive_ptr<Work> ref) {
+                return output.keyed_output(key, ref);
+            }
+
+            inline Input<output_type>
+            embed(const std::function<void(output_type, interface_type &)> &&fn,
+                  Work *ref) {
+                return output.embed(fn, ref);
+            }
+
+          private:
+            OUTPUT<PROPAGATE, single_type> output;
+        };
+    };
+
+    /**
+     * @brief A helper for NodeBuilder.connect, to indicate that the given
+     * Input
+     * shouldn't be connected to anything.
+     * @return An appropriately-cast nullptr that can be passed to connect
+     * or
+     * NodeBuilder.connect
+     */
+    template <typename RET>
+    inline Connectable<RET> *unconnected() {
+        return static_cast<Connectable<RET> *>(nullptr);
+    }
+
+    /**
+     * @brief Connects the Input to the target Connectable
+     * @param to The (possibly-nullptr) Connectable to add this input to
+     * @param from A non-nullptr Input to connect
+     * @tparam RET the type of the Input and target
+     */
+    template <typename RET>
+    inline void connect(Connectable<RET> *to, Input<RET> from) {
+        if (to)
+            to->connect(from);
+    }
+
     template <typename value_type>
     class KeyedOutput final : public Connectable<value_type> {
 
@@ -731,6 +768,7 @@ namespace calcgraph {
         friend class Multiplexed;
 
         Connectable<value_type> *delegate;
+
         /**
          * To make sure the containing Node isn't destroyed while we're
          * still alive
@@ -763,7 +801,13 @@ namespace calcgraph {
         using output_type = std::shared_ptr<RET>;
         using key_type = typename RET::first_type;
         using value_type = typename RET::second_type;
+        using interface_type = KeyedConnectable<RET>;
 
+      private:
+        using embed_type =
+            const std::function<void(output_type, interface_type &)>;
+
+      public:
         inline void connect(Input<output_type> a) { unkeyed.connect(a); }
 
         inline void disconnect(Input<output_type> a) { unkeyed.disconnect(a); }
@@ -787,15 +831,49 @@ namespace calcgraph {
          */
         inline KeyedOutput<value_type>
         keyed_output(key_type key, boost::intrusive_ptr<Work> ref) {
-            auto found = keyed.emplace(std::piecewise_construct,
-                                       std::forward_as_tuple(key),
-                                       std::forward_as_tuple());
-            return KeyedOutput<value_type>(found.first->second, ref);
+            return KeyedOutput<value_type>(lookup(key), ref);
+        }
+
+        inline Input<output_type> embed(embed_type &&fn, Work *ref) {
+            class Embed final : public Storeable<output_type>,
+                                public Work,
+                                public interface_type {
+
+                embed_type fn;
+                Multiplexed<PROPAGATE, RET> *output;
+                Work *ref;
+
+                Embed(embed_type &&fn, Multiplexed<PROPAGATE, RET> *output,
+                      Work *ref) noexcept : fn(fn),
+                                            output(output),
+                                            ref(ref),
+                                            Work(flags::DONT_SCHEDULE) {}
+                Embed(const Embed &other) = delete;
+                friend class Multiplexed<PROPAGATE, RET>;
+
+              public:
+                inline void store(output_type v) { fn(v, *this); }
+                void eval(WorkState &) { std::abort(); }
+                void connect(Input<output_type> a) { output->connect(a); }
+                void disconnect(Input<output_type> a) { output->disconnect(a); }
+                Connectable<value_type> &keyed_output(key_type key) {
+                    return output->lookup(key);
+                }
+            };
+            auto ret = new Embed(std::move(fn), this, ref);
+            return Input<output_type>(*ret, ret);
         }
 
       private:
         std::unordered_map<key_type, SingleList<PROPAGATE, value_type>> keyed;
         SingleList<PROPAGATE, output_type> unkeyed;
+
+        Connectable<value_type> &lookup(key_type key) {
+            auto found = keyed.emplace(std::piecewise_construct,
+                                       std::forward_as_tuple(key),
+                                       std::forward_as_tuple());
+            return found.first->second;
+        }
     };
 
     /**
@@ -896,7 +974,7 @@ namespace calcgraph {
             void eval(WorkState &) { std::abort(); }
 
           private:
-            Tombstone() : Work(0) {}
+            Tombstone() : Work(flags::DONT_SCHEDULE) {}
             friend class Graph;
         };
 
@@ -951,9 +1029,10 @@ namespace calcgraph {
             }
         }
 
-        Input(std::shared_ptr<Storeable<INPUT>> in) noexcept : in(in.get()) {}
-        Input(Storeable<INPUT> *in) noexcept : in(in) {}
-        Input(Storeable<INPUT> &in) noexcept : in(&in) {}
+        Input(std::shared_ptr<Storeable<INPUT>> in) noexcept : in(in.get()),
+                                                               ref() {}
+        Input(Storeable<INPUT> *in) noexcept : in(in), ref() {}
+        Input(Storeable<INPUT> &in) noexcept : in(&in), ref() {}
         Input(const Input &other) noexcept : in(other.in), ref(other.ref) {}
         Input(Input &&other) noexcept : in(std::move(other.in)),
                                         ref(std::move(other.ref)) {}
@@ -999,8 +1078,10 @@ namespace calcgraph {
         friend class Node;
         template <typename>
         friend class Accumulator;
-        template <template <typename> class PROPAGATE, typename RET>
+        template <template <typename> class, typename>
         friend class SingleList;
+        template <template <typename> class, typename>
+        friend class Multiplexed;
     };
 
     /**
@@ -1036,6 +1117,7 @@ namespace calcgraph {
 
       private:
         using output_type = typename OUTPUT<PROPAGATE, RET>::output_type;
+        using interface_type = typename OUTPUT<PROPAGATE, RET>::interface_type;
 
       public:
         /**
@@ -1108,8 +1190,7 @@ namespace calcgraph {
          * Input.append(). Note that this method won't schedule the node for
          * evaluation, so if you want the reduced vector to be processed you
          * should schedule the Node directly. The Input must not be used
-         *after
-         * passed to this method.
+         *after passed to this method.
          *
          * @tparam N which function argument to get; it must have a Variadic
          * input policy
@@ -1188,6 +1269,13 @@ namespace calcgraph {
             output.propagate(std::move(val), ws);
 
             this->release();
+        }
+
+        Input<output_type>
+        embed(std::function<void(output_type, interface_type &)> fn) {
+            Input<output_type> ret = output.embed(std::move(fn), this);
+            connect(ret);
+            return ret;
         }
 
       private:
@@ -1472,8 +1560,7 @@ namespace calcgraph {
                 stats->worked++;
 
             // finally finished with this Work - it's not on the Graph queue
-            // or
-            // the heap
+            // or the heap
             intrusive_ptr_release(w);
         }
 
@@ -1482,6 +1569,8 @@ namespace calcgraph {
 
     // see comments in declaration
     void Work::schedule(Graph &g) {
+        if (id == flags::DONT_SCHEDULE)
+            return;
 
         // don't want work to be deleted while queued
         intrusive_ptr_add_ref(this);
