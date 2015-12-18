@@ -591,7 +591,7 @@ class GraphTest final : public CppUnit::TestFixture {
         node->input<0>().append(g, p_intpair(new intpair(5, 7)));
         auto embedded = node->embed([&res1, &res2](p_intpair i, auto &output) {
             res1.store(i->second);
-            output.keyed_output(4).connect(res2);
+            output.keyed_output(4)->connect(res2);
         });
 
         g(&stats);

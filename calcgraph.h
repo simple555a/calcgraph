@@ -567,12 +567,11 @@ namespace calcgraph {
         virtual ~Connectable() {}
     };
 
-    template <typename RET>
-    class KeyedConnectable : public Connectable<std::shared_ptr<RET>> {
+    template <typename KEY, typename VALUE>
+    class KeyedConnectable
+        : public Connectable<std::shared_ptr<std::pair<KEY, VALUE>>> {
       public:
-        virtual Connectable<typename RET::second_type> &
-            keyed_output(typename RET::first_type) = 0;
-
+        virtual Connectable<VALUE> *keyed_output(KEY) = 0;
         virtual ~KeyedConnectable() {}
     };
 
@@ -616,7 +615,7 @@ namespace calcgraph {
             }
         }
 
-        inline Input<output_type> embed(embed_type &&fn, Work *ref) {
+        inline Input<output_type> embed(embed_type &&fn) {
             class Embed final : public Storeable<output_type>, public Work {
 
                 embed_type fn;
@@ -690,10 +689,9 @@ namespace calcgraph {
                 return output.keyed_output(key, ref);
             }
 
-            inline Input<output_type>
-            embed(const std::function<void(output_type, interface_type &)> &&fn,
-                  Work *ref) {
-                return output.embed(fn, ref);
+            inline Input<output_type> embed(
+                const std::function<void(output_type, interface_type &)> &&fn) {
+                return output.embed(std::move(fn));
             }
 
           private:
@@ -801,7 +799,7 @@ namespace calcgraph {
         using output_type = std::shared_ptr<RET>;
         using key_type = typename RET::first_type;
         using value_type = typename RET::second_type;
-        using interface_type = KeyedConnectable<RET>;
+        using interface_type = KeyedConnectable<key_type, value_type>;
 
       private:
         using embed_type =
@@ -834,20 +832,19 @@ namespace calcgraph {
             return KeyedOutput<value_type>(lookup(key), ref);
         }
 
-        inline Input<output_type> embed(embed_type &&fn, Work *ref) {
+        inline Input<output_type> embed(embed_type &&fn) {
             class Embed final : public Storeable<output_type>,
                                 public Work,
                                 public interface_type {
 
                 embed_type fn;
                 Multiplexed<PROPAGATE, RET> *output;
-                Work *ref;
 
-                Embed(embed_type &&fn, Multiplexed<PROPAGATE, RET> *output,
-                      Work *ref) noexcept : fn(fn),
-                                            output(output),
-                                            ref(ref),
-                                            Work(flags::DONT_SCHEDULE) {}
+                Embed(embed_type &&fn,
+                      Multiplexed<PROPAGATE, RET> *output) noexcept
+                    : fn(fn),
+                      output(output),
+                      Work(flags::DONT_SCHEDULE) {}
                 Embed(const Embed &other) = delete;
                 friend class Multiplexed<PROPAGATE, RET>;
 
@@ -856,11 +853,11 @@ namespace calcgraph {
                 void eval(WorkState &) { std::abort(); }
                 void connect(Input<output_type> a) { output->connect(a); }
                 void disconnect(Input<output_type> a) { output->disconnect(a); }
-                Connectable<value_type> &keyed_output(key_type key) {
-                    return output->lookup(key);
+                Connectable<value_type> *keyed_output(key_type key) {
+                    return &output->lookup(key);
                 }
             };
-            auto ret = new Embed(std::move(fn), this, ref);
+            auto ret = new Embed(std::move(fn), this);
             return Input<output_type>(*ret, ret);
         }
 
@@ -1273,7 +1270,7 @@ namespace calcgraph {
 
         Input<output_type>
         embed(std::function<void(output_type, interface_type &)> fn) {
-            Input<output_type> ret = output.embed(std::move(fn), this);
+            Input<output_type> ret = output.embed(std::move(fn));
             connect(ret);
             return ret;
         }

@@ -23,7 +23,7 @@ struct Order final {
 
     Order(uint8_t ticker, TradeSignal type, double price)
         : ticker(ticker), type(type), price(price) {
-        printf("opening %s @ %0.3f on %dY", TradeSignalNames[type], price,
+        printf("opening %s @ %0.3f on %dY\n", TradeSignalNames[type], price,
                ticker);
     }
 
@@ -81,7 +81,7 @@ static calcgraph::Graph g;
  * @brief The distance from the interpolated yield curve a price must be to
  * trigger a "buy" or "sell" signal
  */
-static const double THRESHOLD = 0.01;
+static const double THRESHOLD = 0.1;
 
 /**
  * @brief Polynomial curve fitting on 2D data
@@ -167,10 +167,7 @@ void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
             .connect([ticker](double price, TradeSignal sig, order current) {
                 switch (sig) {
                 case HOLD:
-                    if (current) {
-                        current->close(price);
-                    }
-                    return order();
+                    return current;
                 case BUY:
                 case SELL:
                     if (current) {
@@ -253,10 +250,13 @@ bool listen_to_datagrams(calcgraph::Input<string> &&in) {
 }
 
 void install_sigint_handler() {
-    signal(SIGINT, [](int) {
+    auto handler = [](int sig) {
         stop.store(true);
-        std::cerr << "SIGINT, exiting" << std::endl;
-    });
+        std::cerr << "received signal " << sig << ", exiting" << std::endl;
+    };
+    signal(SIGINT, handler);
+    signal(SIGTERM, handler);
+    signal(SIGHUP, handler);
 }
 
 int main() {
@@ -285,11 +285,9 @@ int main() {
     }
 
     dispatcher->embed(
-        [&curve_fitter](ticker_price_pair new_pair,
-                        calcgraph::MultiValued<calcgraph::Multiplexed>::type<
-                            calcgraph::OnChange, uint8double_vector> &output) {
+        [&curve_fitter](ticker_price_pair new_pair, auto &output) {
             auto price = output.keyed_output(new_pair->first);
-            build_pipeline(new_pair->first, price, curve_fitter.get(),
+            build_pipeline(new_pair->first, *price, curve_fitter.get(),
                            new_pair->second);
         });
 
