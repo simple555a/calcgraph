@@ -368,8 +368,7 @@ namespace calcgraph {
 
     /**
      * @brief A building block of the graph; either a raw input or code to
-     * be
-     * evaluated.
+     * be evaluated.
      */
     class Work {
       public:
@@ -417,15 +416,12 @@ namespace calcgraph {
          * @page worklocking Locking a Work object
          *
          * We'll use the next pointer of a Work object to store two
-         *orthogonal
-         * pieces of information. The LSB will store the "locked" - or
-         *exclusive
-         * lock - flag, and the remaining bits will store the next link in
-         *the
-         * (intrusive) Graph.work_queue, or nullptr if this node isn't
-         * scheduled. Note that the locked flag refers to the Work that
-         *contains
-         * the next pointer, not the Work pointed to.
+         *orthogonal pieces of information. The LSB will store the "locked" - or
+         *exclusive lock - flag, and the remaining bits will store the next link
+         *in
+         *the (intrusive) Graph.work_queue, or nullptr if this node isn't
+         *scheduled. Note that the locked flag refers to the Work that contains
+         *the next pointer, not the Work pointed to.
          */
       private:
         /**
@@ -576,20 +572,52 @@ namespace calcgraph {
         virtual ~Connectable() {}
     };
 
+    /**
+     * @brief User API for a Multiplexed output policy, for use in functions
+     *passed to Node.embed
+     * @details Node.embed allows the given function access to the
+     *currently-executing Node's output data structures without additional
+     *locking (which is especially useful as the Node locks aren't re-entrant).
+     *This interface is the API to a Multiplexed policy, and is only valid
+     *during execution of the function it was passed to.
+     *
+     * @tparam KEY The type used to uniquely identify each of the Muliplexed
+     *Inputs
+     * @tparam VALUE The types of values fed to each keyed Input
+     */
     template <typename KEY, typename VALUE>
     class KeyedConnectable
         : public Connectable<std::shared_ptr<std::pair<KEY, VALUE>>> {
       public:
+        /**
+         * @brief Get the output associated with the given key
+         * @details A pointer to the Node's (unlocked) data structure for the
+         * key. This pointer is also only valid during the execution of the
+         * function it was passed to.
+         */
         virtual Connectable<VALUE> *keyed_output(KEY) = 0;
         virtual ~KeyedConnectable() {}
     };
 
+    /**
+     * @brief The internal data structure for a Node that manages a list of
+     *Inputs.
+     * @details This class is not thread-safe - access is governed by the
+     *containing Node.
+     *
+     * @tparam PROPAGATE The propagation policy to use
+     * @tparam RET The type of value the managed Inputs can consume.
+     */
     template <template <typename> class PROPAGATE, typename RET>
     class SingleList final : public Connectable<RET> {
       public:
         using output_type = RET;
         using key_type = std::nullptr_t;
         using value_type = std::nullptr_t;
+        /**
+         * @brief The class to use to represent this object when it's passed to
+         * a Node.embed'ed function.
+         */
         using interface_type = Connectable<output_type>;
 
       private:
@@ -597,19 +625,32 @@ namespace calcgraph {
             const std::function<void(output_type, interface_type &)>;
 
       public:
+        /**
+         * @brief Adds the given Input to the managed list, even if it is
+         * already present.
+         */
         inline void connect(Input<output_type> a) override {
             dependents.push_back(a);
         }
 
+        /**
+         * @brief Removes all occurances of the given Input from the managed
+         * list.
+         */
         inline void disconnect(Input<output_type> a) override {
-            auto it = std::find(dependents.begin(), dependents.end(), a);
-            if (it != dependents.end()) {
-                // slightly less shuffling
-                std::swap(*it, dependents.back());
-                dependents.pop_back();
+            for (std::size_t i = 0; i < dependents.size(); ++i) {
+                if (dependents[i] == a) {
+                    // slightly less shuffling
+                    std::swap(dependents[i], dependents.back());
+                    dependents.pop_back();
+                }
             }
         }
 
+        /**
+         * @brief Pass the given value to each of the Inputs (if allowed by the
+         * propagation policy) and schedule them (also if allowed).
+         */
         inline void propagate(RET &&val, WorkState &ws) {
             if (!propagation_policy.push_value(val))
                 return;
@@ -624,6 +665,13 @@ namespace calcgraph {
             }
         }
 
+        /**
+         * @brief Attach the given function to an Input and add that Input to
+         *the list.
+         * @see Node.embed
+         *
+         * @return The created Input, which you can pass to disconnect.
+         */
         inline Input<output_type> embed(embed_type &&fn) {
             class Embed final : public Storeable<output_type>, public Work {
 
@@ -650,9 +698,8 @@ namespace calcgraph {
       private:
         /**
          * @brief Downstream dependencies
-         * @details Not threadsafe so controlled by the Work.next LSB
-         * locking
-         * mechanism
+         * @details Not threadsafe so controlled by the containing Work's next
+         * LSB locking mechanism
          */
         std::vector<Input<output_type>> dependents;
 
@@ -662,6 +709,15 @@ namespace calcgraph {
         PROPAGATE<RET> propagation_policy;
     };
 
+    /**
+     * @brief An output policy that wraps another policy, feeding the iterable
+     *output of the Node's function to its delegate one element at a time.
+     * @details Useful when the containing Node processes a batch of values
+     *(maybe from an Accumulate input policy) but downstream Nodes can only
+     *process a single element at a time.
+     *
+     * @tparam OUTPUT The output policy to wrap
+     */
     template <template <template <typename> class, typename> class OUTPUT>
     struct MultiValued final {
         template <template <typename> class PROPAGATE, typename RET>
@@ -678,6 +734,10 @@ namespace calcgraph {
             using key_type = typename OUTPUT<PROPAGATE, single_type>::key_type;
             using value_type =
                 typename OUTPUT<PROPAGATE, single_type>::value_type;
+            /**
+             * @brief The class to use to represent this object when it's passed
+             * to a Node.embed'ed function.
+             */
             using interface_type =
                 typename OUTPUT<PROPAGATE, single_type>::interface_type;
 
@@ -687,8 +747,13 @@ namespace calcgraph {
                 output.disconnect(a);
             }
 
+            /**
+             * @brief Iterate over the given value using std::begin and std::end
+             * to get iterators, passing each value to the delegate output
+             * policy.
+             */
             inline void propagate(RET &&val, WorkState &ws) {
-                for (auto i = val->begin(); i != val->end(); i++) {
+                for (auto i = std::begin(*val); i != std::end(*val); i++) {
                     output.propagate(std::move(*i), ws);
                 }
             }
@@ -710,11 +775,9 @@ namespace calcgraph {
 
     /**
      * @brief A helper for NodeBuilder.connect, to indicate that the given
-     * Input
-     * shouldn't be connected to anything.
+     * Input shouldn't be connected to anything.
      * @return An appropriately-cast nullptr that can be passed to connect
-     * or
-     * NodeBuilder.connect
+     * or NodeBuilder.connect
      */
     template <typename RET>
     inline Connectable<RET> *unconnected() {
@@ -733,6 +796,16 @@ namespace calcgraph {
             to->connect(from);
     }
 
+    /**
+     * @brief A Connectable implementation returned by Node.keyed_output.
+     * @details This class is thread-safe and can be passed across threads and
+     *stored on the heap. It keeps a reference to the Node that created it so
+     *it'll never outlive the Node it points to. As Node locks aren't
+     *re-entrant, it can't be used from a function passed to its Node's
+     *Node.embed method.
+     *
+     * @tparam value_type The type of values this class can accept.
+     */
     template <typename value_type>
     class KeyedOutput final : public Connectable<value_type> {
 
@@ -808,6 +881,10 @@ namespace calcgraph {
         using output_type = std::shared_ptr<RET>;
         using key_type = typename RET::first_type;
         using value_type = typename RET::second_type;
+        /**
+         * @brief The class to use to represent this object when it's passed to
+         * a Node.embed'ed function.
+         */
         using interface_type = KeyedConnectable<key_type, value_type>;
 
       private:
@@ -815,9 +892,21 @@ namespace calcgraph {
             const std::function<void(output_type, interface_type &)>;
 
       public:
+        /**
+         * @brief Connect an Input to the unkeyed output values.
+         */
         inline void connect(Input<output_type> a) { unkeyed.connect(a); }
 
+        /**
+         * @brief Disconnect an Input from the unkeyed output values.
+         */
         inline void disconnect(Input<output_type> a) { unkeyed.disconnect(a); }
+
+        /**
+         * @brief Pass the given value of the key-value std::pair to the
+         * appropriate Inputs, or pass the whole pair to the unkeyed Inputs if
+         * no Input keyed_output has never been called for the key.
+         */
         inline void propagate(RET &&val, WorkState &ws) {
             auto found = keyed.find(val.first);
             if (found == keyed.end()) {
@@ -841,6 +930,13 @@ namespace calcgraph {
             return KeyedOutput<value_type>(lookup(key), ref);
         }
 
+        /**
+         * @brief Attach the given function to an Input and add that Input to
+         *the "unkeyed" list.
+         * @see Node.embed
+         *
+         * @return The created Input, which you can pass to disconnect.
+         */
         inline Input<output_type> embed(embed_type &&fn) {
             class Embed final : public Storeable<output_type>,
                                 public Work,
@@ -927,8 +1023,7 @@ namespace calcgraph {
      * @brief The calcuation-graph-wide state
      * @details This class is the only way to make calculation nodes in the
      * graph, and is in charge of the work_queue, a intrinsic singly-linked
-     * list
-     * of Work that needs re-evaluating due to upstream changes.
+     * list of Work that needs re-evaluating due to upstream changes.
      */
     class Graph final {
       public:
@@ -937,11 +1032,9 @@ namespace calcgraph {
         /**
          * @brief Run the graph evaluation to evalute all Work items on the
          * work_queue, and all items recursively dependent on them (at
-         *least,
-         * as determined by each Node's propagation policy).
+         *least, as determined by each Node's propagation policy).
          * @details Doesn't release the locks we have on the Work items in
-         *the
-         * queue, as we'll just put them in a heap.
+         *the queue, as we'll just put them in a heap.
          *
          * @return true iff any Work items were eval'ed
          */
@@ -1010,8 +1103,7 @@ namespace calcgraph {
     /**
      * @brief An input to a calculation Node
      * @details Used for putting external data into the calcuation graph,
-     *and
-     * connecting calculation nodes to each other.
+     *and connecting calculation nodes to each other.
      *
      * @tparam INPUT the type of the values this input accepts.
      */
@@ -1020,8 +1112,7 @@ namespace calcgraph {
       public:
         /**
          * @brief Sets the input to an externally-provided value, and
-         *schedules
-         * the Node we're an Input of on the Graph's work_queue for
+         *schedules the Node we're an Input of on the Graph's work_queue for
          * re-evaluation.
          *
          * @param graph The owner of the work queue to add the Input's Node
@@ -1055,8 +1146,7 @@ namespace calcgraph {
 
         /**
          * @brief Equality semantics, based on what it's an Input to, but
-         * not
-         * what the current value is.
+         * not what the current value is.
          */
         inline bool operator==(const Input &other) const {
             return in == other.in;
@@ -1070,8 +1160,7 @@ namespace calcgraph {
 
         /**
          * @brief A ref-counted pointer to the owner of the 'in' Latest, so
-         * it
-         * doesn't get freed while we're still alive
+         * it doesn't get freed while we're still alive
          */
         boost::intrusive_ptr<Work> ref;
 
@@ -1128,8 +1217,7 @@ namespace calcgraph {
       public:
         /**
          * @brief Get an Input object associated with the N'th argument of
-         *this
-         * Node's function FN
+         *this Node's function FN
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
@@ -1149,8 +1237,7 @@ namespace calcgraph {
         /**
          * @brief Return a Tuple of all the Inputs to this function.
          * @details Equivalent to calling input() for the N arguments of the
-         * FN
-         * function
+         * FN function
          */
         std::tuple<Input<typename INPUTS::input_type>...> inputtuple() {
             return inputtuple_fn(std::index_sequence_for<INPUTS...>{});
@@ -1158,15 +1245,13 @@ namespace calcgraph {
 
         /**
          * @brief Add a new Input to the (variadic) the N'th argument of
-         *this
-         * Node's function FN
+         *this Node's function FN
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
          * Input.append(). Note that this method won't schedule the node for
          * evaluation, so if you want the expanded vector to be processed
-         *you
-         * should schedule the Node directly.
+         *you should schedule the Node directly.
          *
          * @tparam N which function argument to get; it must have a Variadic
          * input policy
@@ -1188,8 +1273,7 @@ namespace calcgraph {
 
         /**
          * @brief Add a new Input to the (variadic) the N'th argument of
-         *this
-         * Node's function FN
+         *this Node's function FN
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
@@ -1233,6 +1317,14 @@ namespace calcgraph {
             release();
         }
 
+        /**
+         * @brief If this Node's output policy supports keyed outputs, this
+         *method will return a thread-safe Connectable for the given key.
+         * @details The returned class is thread-safe and can be passed across
+         *threads and stored on the heap. It keeps a reference to this Node so
+         *it'll never outlive it. As Node locks aren't re-entrant, it can't be
+         *used from a function passed to its Node's Node.embed method.
+         */
         template <template <template <typename> class, typename>
                   class O = OUTPUT>
         typename std::enable_if_t<
@@ -1277,6 +1369,18 @@ namespace calcgraph {
             this->release();
         }
 
+        /**
+         * @brief Attach a function to this Node as an Input connected to this
+         *Node's output policy.
+         * @details Useful for attaching debugging or telemetry logic, or
+         *dynamically modifying the Node's output policy. The given function is
+         *attached to an Input and connected to this Node using connect, so is
+         *executed after the Node's main function is executed (i.e. when the
+         *results of the Node's function are passed to the output policy).
+         *
+         * @return An Input that can be used to remove this function from the
+         *Node - pass it as the argument to disconnect.
+         */
         Input<output_type>
         embed(std::function<void(output_type, interface_type &)> fn) {
             Input<output_type> ret = output.embed(std::move(fn));
@@ -1516,6 +1620,7 @@ namespace calcgraph {
         }
     }
 
+    // see comments in declaration
     constexpr bool WorkQueueCmp::operator()(const Work *a,
                                             const Work *b) const {
         return a->id > b->id;
