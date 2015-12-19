@@ -16,6 +16,9 @@
 enum TradeSignal { BUY, SELL, HOLD };
 static const char *TradeSignalNames[] = {"BUY", "SELL", "HOLD"};
 
+/**
+ * @brief An order on an exchange; the position the trading bot wants to take.
+ */
 struct Order final {
     const uint8_t ticker;
     const TradeSignal type;
@@ -46,7 +49,6 @@ using uint8double_vector =
     std::shared_ptr<std::vector<std::pair<uint8_t, double>>>;
 using string = std::shared_ptr<std::string>;
 using strings = std::shared_ptr<std::forward_list<string>>;
-using ticker_price_pair = std::shared_ptr<std::pair<uint8_t, double>>;
 using order = std::shared_ptr<Order>;
 
 /**
@@ -84,7 +86,7 @@ static calcgraph::Graph g;
 static const double THRESHOLD = 0.1;
 
 /**
- * @brief Polynomial curve fitting on 2D data
+ * @brief Fit a polynomial curve to 2-dimensional data
  * @see http://rosettacode.org/wiki/Polynomial_regression#C
  */
 double_vector polyfit(const uint8_vector dx, const double_vector dy) {
@@ -163,7 +165,7 @@ void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
             .propagate<calcgraph::Weak>() // so we don't wake ourselves up
             .latest(&price, initial_price)
             .latest(signal_generator.get(), HOLD)
-            .unconnected<std::shared_ptr<Order>>()
+            .unconnected<order>()
             .connect([ticker](double price, TradeSignal sig, order current) {
                 switch (sig) {
                 case HOLD:
@@ -183,6 +185,9 @@ void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
     order_manager->connect(order_manager->input<2>());
 }
 
+/**
+ * @brief Parse the given quotes into maturity-yield pairs.
+ */
 uint8double_vector dispatch(strings msgs) {
     uint8double_vector ret =
         uint8double_vector(new uint8double_vector::element_type());
@@ -267,7 +272,7 @@ int main() {
     auto dispatcher =
         g.node()
             .propagate<calcgraph::OnChange>()
-            .output<calcgraph::MultiValued<calcgraph::Multiplexed>::type>()
+            .output<calcgraph::MultiValued<calcgraph::Demultiplexed>::type>()
             .accumulate(calcgraph::unconnected<string>())
             .connect(dispatch);
 
@@ -284,12 +289,11 @@ int main() {
         build_pipeline(benchmark, price, curve_fitter.get(), NAN);
     }
 
-    dispatcher->embed(
-        [&curve_fitter](ticker_price_pair new_pair, auto &output) {
-            auto price = output.keyed_output(new_pair->first);
-            build_pipeline(new_pair->first, *price, curve_fitter.get(),
-                           new_pair->second);
-        });
+    dispatcher->embed([&curve_fitter](auto new_pair, auto &output) {
+        auto price = output.keyed_output(new_pair->first);
+        build_pipeline(new_pair->first, *price, curve_fitter.get(),
+                       new_pair->second);
+    });
 
     if (!listen_to_datagrams(dispatcher->input<0>())) {
         stop.store(true);

@@ -443,14 +443,14 @@ class GraphTest final : public CppUnit::TestFixture {
                                   res.read()->begin(), res.read()->end()));
     }
 
-    void testMultiplexed() {
+    void testDemultiplexed() {
         struct calcgraph::Stats stats;
         calcgraph::Graph g;
         calcgraph::Latest<p_intpair> res;
 
         // setup
         auto node = g.node()
-                        .output<calcgraph::Multiplexed>()
+                        .output<calcgraph::Demultiplexed>()
                         .latest(calcgraph::unconnected<p_intpair>())
                         .connect([](p_intpair a) { return *a; });
         node->connect(res);
@@ -617,7 +617,7 @@ class GraphTest final : public CppUnit::TestFixture {
 
         // setup
         auto node = g.node()
-                        .output<calcgraph::Multiplexed>()
+                        .output<calcgraph::Demultiplexed>()
                         .latest(calcgraph::unconnected<p_intpair>())
                         .connect([](p_intpair a) { return *a; });
         node->input<0>().append(g, p_intpair(new intpair(5, 7)));
@@ -654,7 +654,7 @@ class GraphTest final : public CppUnit::TestFixture {
     CPPUNIT_TEST(testThreaded);
     CPPUNIT_TEST(testAccumulator);
     CPPUNIT_TEST(testVariadic);
-    CPPUNIT_TEST(testMultiplexed);
+    CPPUNIT_TEST(testDemultiplexed);
     CPPUNIT_TEST(testMultiValued);
     CPPUNIT_TEST(testMemoryLeakWorkQueue);
     CPPUNIT_TEST(testEmbedSingle);

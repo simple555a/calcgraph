@@ -30,7 +30,7 @@ namespace calcgraph {
               template <template <typename> class, typename> class, class...>
     class NodeBuilder;
     template <template <typename> class, typename>
-    class Multiplexed;
+    class Demultiplexed;
     template <typename>
     class KeyedOutput;
 
@@ -573,12 +573,12 @@ namespace calcgraph {
     };
 
     /**
-     * @brief User API for a Multiplexed output policy, for use in functions
+     * @brief User API for a Demultiplexed output policy, for use in functions
      *passed to Node.embed
      * @details Node.embed allows the given function access to the
      *currently-executing Node's output data structures without additional
      *locking (which is especially useful as the Node locks aren't re-entrant).
-     *This interface is the API to a Multiplexed policy, and is only valid
+     *This interface is the API to a Demultiplexed policy, and is only valid
      *during execution of the function it was passed to.
      *
      * @tparam KEY The type used to uniquely identify each of the Muliplexed
@@ -845,7 +845,7 @@ namespace calcgraph {
             : delegate(&delegate),
               ref(ref) {}
         template <template <typename> class, typename>
-        friend class Multiplexed;
+        friend class Demultiplexed;
 
         Connectable<value_type> *delegate;
 
@@ -860,7 +860,8 @@ namespace calcgraph {
      * @brief An output policy that passes values to different Inputs
      *depending on part of the value (the key, i.e. what std::get<0> returns).
      * @details Use the keyed_output function to get a Connectable for the given
-     *key. Any key-value pairs passed to this Multiplexed instance for keys that
+     *key. Any key-value pairs passed to this Demultiplexed instance for keys
+     *that
      *haven't been passed (so far) to keyed_output will be passed as std::pairs
      *to the default output. Note that all values for these "unmatched" keys
      *will be sent, so even if you use this functionality to build parts of the
@@ -871,7 +872,7 @@ namespace calcgraph {
      *and the right side is the value to be passed to downstream nodes.
      */
     template <template <typename> class PROPAGATE, typename RET>
-    class Multiplexed final : public Connectable<std::shared_ptr<RET>> {
+    class Demultiplexed final : public Connectable<std::shared_ptr<RET>> {
       public:
         /**
          * @brief The type of values that aren't associated with a key
@@ -943,15 +944,15 @@ namespace calcgraph {
                                 public interface_type {
 
                 embed_type fn;
-                Multiplexed<PROPAGATE, RET> *output;
+                Demultiplexed<PROPAGATE, RET> *output;
 
                 Embed(embed_type &&fn,
-                      Multiplexed<PROPAGATE, RET> *output) noexcept
+                      Demultiplexed<PROPAGATE, RET> *output) noexcept
                     : fn(fn),
                       output(output),
                       Work(flags::DONT_SCHEDULE) {}
                 Embed(const Embed &other) = delete;
-                friend class Multiplexed<PROPAGATE, RET>;
+                friend class Demultiplexed<PROPAGATE, RET>;
 
               public:
                 inline void store(output_type v) { fn(v, *this); }
@@ -1176,7 +1177,7 @@ namespace calcgraph {
         template <template <typename> class, typename>
         friend class SingleList;
         template <template <typename> class, typename>
-        friend class Multiplexed;
+        friend class Demultiplexed;
     };
 
     /**
