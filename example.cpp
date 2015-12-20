@@ -136,8 +136,7 @@ void build_pipeline(uint8_t ticker, calcgraph::Connectable<double> &price,
             .propagate<calcgraph::OnChange>()
             .latest(&price, initial_price)
             .latest(curve)
-            .connect([ticker](double price,
-                              double_vector yield_curve) -> TradeSignal {
+            .connect([ticker](double price, double_vector yield_curve) {
 
                 if (!yield_curve || std::isnan(price)) {
                     return HOLD; // not initialized properly

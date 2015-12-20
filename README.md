@@ -7,6 +7,8 @@ This has several advantages:
 - Parallelism for free: the calculation graph is built with lock-free primitives, so many threads can propagate changes through the graph without blocking or data races, and each node in the graph is guaranteed to only be executed by a single thread at once.
 - Compile-time verification that the application logic is connected correctly, and all parameters to a piece of logic have been connected or explicitly ignored.
 
+### Logic Evaluation
+
 ## Example: Bond Stat-Arb Trading Bot
 
 The `example.cpp` file in the repo is the skeleton of a bond [stat-arb](https://en.wikipedia.org/wiki/Statistical_arbitrage) trading bot. It listens for bond yield quotes for the maturities of a single [issuer](http://www.investopedia.com/terms/i/issuer.asp) sent in UDP datagrams (one quote per datagram, as a text string like `10Y 2.15`), then [bootstraps](https://en.wikipedia.org/wiki/Bootstrapping_%28finance%29) a yield curve from the prices of a fixed set of "benchmark" maturities. The bot then uses the yield curve to generate trading signals, and manages orders based on those signals, tracking the P&L of the trades it makes. As this is just a short example, the yield curve it fits is just a simple two-degree polynomial through the benchmark yields, and the bot just prints the orders it want to execute to its standard out.
@@ -84,6 +86,8 @@ uint8double_vector dispatch(
     }
     return ret;
 }
+
+static calcgraph::Graph g;
 
 int main() {
     // create a single thread to constantly propagate changes through the graph
@@ -177,18 +181,24 @@ void build_pipeline(uint8_t maturity, calcgraph::Connectable<double> &price,
                     double initial_price) {
     auto signal_generator =
         g.node()
+            // Only re-evaluate the order-management logic below if the trading
+            // signal changes
             .propagate<calcgraph::OnChange>()
+            // connect the signal generation logic to the latest yield for the
+            // maturity, and seed it with initial_value (which may be the yield
+            // from the quote of a new maturity that caused us to build this
+            // 'pipeline')
             .latest(&price, initial_price)
+            // We also only care about the latest fitted yield curve
             .latest(curve)
-            .connect([maturity](double price,
-                              double_vector yield_curve) -> TradeSignal {
+            .connect([maturity](double price, double_vector yield_curve) {
 
                 if (!yield_curve || std::isnan(price)) {
                     return HOLD; // not enough quotes received yet
                 }
 
                 // work out the model price ("fair value") from our fitted yield
-                // curve
+                // curve polynomial
                 double fair_value = 0.0;
                 for (uint8_t i = 0; i < DEGREE; ++i) {
                     fair_value += pow(maturity, i) * yield_curve->at(i);
@@ -204,14 +214,50 @@ void build_pipeline(uint8_t maturity, calcgraph::Connectable<double> &price,
                     return HOLD;
             });
 
+    // This "order manager" generates orders based on the trading signal. In a
+    // real application it'd send changes in its orders to an exchange (or
+    // broker), and process the responses (which would probably be an
+    // additional Accumulated input). However, this dummy implementation will
+    // just print trades using printf statements in the Order struct's
+    // constructor & close method.
+    // This Node is a good example of how to represent state between evaluation
+    // of the order management logic - in this case, the current Order struct
+    // that represents the trading bot's position in this maturity.
     auto order_manager =
         g.node()
-            .propagate<calcgraph::Weak>() // so we don't wake ourselves up
+            // The output of this function is connected back to the third
+            // argument of the order management logic lambda, so we want to set
+            // a propagation policy that doesn't cause an infinite loop
+            // re-evaluating the order management node as it's input keeps
+            // changing. The Weak policy pushes the changed output value to
+            // downstream nodes (in this case, itself) but doesn't schedule the
+            // downstream nodes for evaluation. Instead this node will only be
+            // re-evaluated if one (or both) of its other inputs (the current
+            // yield of this maturity or the bootstrapped yield curve
+            // coefficients) change - yet will still see the correct value of
+            // the current position (Order).
+            .propagate<calcgraph::Weak>()
+            // The order management logic also needs the current yield of this
+            // maturity so we know what level to open and close orders at.
             .latest(&price, initial_price)
             .latest(signal_generator.get(), HOLD)
+            // The framework makes sure we explicitly mention unconnected
+            // inputs so we can be sure we haven't forgotten anything at
+            // compile-time. As we're connecting the output of this node to
+            // itself, we need to construct it first with an unconnected input,
+            // then connect up the input in the next statement.
             .unconnected<std::shared_ptr<Order>>()
             .connect([maturity](double price, TradeSignal sig,
                               std::shared_ptr<Order> current) {
+
+                // our order generation algorithm isn't particularly
+                // sophisticated; we'll make a trade as soon as we see a
+                // signal, and hold the trade until the signal flips to the
+                // opposite recommendation (i.e. we'll hold a BUY order until
+                // our signal suggests we enter a SELL order, at which point
+                // we'll close the BUY and open a SELL). This means we'll tend
+                // to always have an open position in each maturity we're
+                // watching.
                 switch (sig) {
                 case HOLD:
                     return current;
@@ -227,6 +273,9 @@ void build_pipeline(uint8_t maturity, calcgraph::Connectable<double> &price,
                     return std::shared_ptr<Order>(new Order(maturity, sig, price));
                 }
             });
+
+    // and finally connect the output of the order management - the persistent
+    // 'state' of this function - back to itself.
     order_manager->connect(order_manager->input<2>());
 }
 ```

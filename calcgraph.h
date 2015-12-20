@@ -347,7 +347,7 @@ namespace calcgraph {
         struct Stats *stats;
         friend class Graph;
         /**
-         * @brief The Work.id of the Work item we're currently processing
+         * @brief The Work::id of the Work item we're currently processing
          */
         uint32_t current_id;
         WorkState(Graph &g, struct Stats *stats) : g(g), stats(stats) {}
@@ -419,14 +419,14 @@ namespace calcgraph {
          *orthogonal pieces of information. The LSB will store the "locked" - or
          *exclusive lock - flag, and the remaining bits will store the next link
          *in
-         *the (intrusive) Graph.work_queue, or nullptr if this node isn't
+         *the (intrusive) Graph::work_queue, or nullptr if this node isn't
          *scheduled. Note that the locked flag refers to the Work that contains
          *the next pointer, not the Work pointed to.
          */
       private:
         /**
          * @brief an intrinsic work queue for graph evaluation, headed by
-         * Graph.work_queue
+         * Graph::work_queue
          */
         std::atomic<std::uintptr_t> next;
 
@@ -497,7 +497,8 @@ namespace calcgraph {
      * @brief A propagation policy that recalculates downstream dependencies
      * only if the Node's output changes (according to the != operator)
      * @details This method isn't thread-safe, but doesn't need to be as it's
-     * only called by Node.eval() when the calculation lock is held. This policy
+     * only called by Node::eval() when the calculation lock is held. This
+     * policy
      * stores the last output value in the Node, so increases the size of the
      * templated Node class and potentially uses even more memory (e.g. if the
      * output is a std::shared_ptr to a large object).
@@ -574,8 +575,8 @@ namespace calcgraph {
 
     /**
      * @brief User API for a Demultiplexed output policy, for use in functions
-     *passed to Node.embed
-     * @details Node.embed allows the given function access to the
+     *passed to Node::embed
+     * @details Node::embed allows the given function access to the
      *currently-executing Node's output data structures without additional
      *locking (which is especially useful as the Node locks aren't re-entrant).
      *This interface is the API to a Demultiplexed policy, and is only valid
@@ -616,7 +617,7 @@ namespace calcgraph {
         using value_type = std::nullptr_t;
         /**
          * @brief The class to use to represent this object when it's passed to
-         * a Node.embed'ed function.
+         * a Node::embed'ed function.
          */
         using interface_type = Connectable<output_type>;
 
@@ -668,7 +669,7 @@ namespace calcgraph {
         /**
          * @brief Attach the given function to an Input and add that Input to
          *the list.
-         * @see Node.embed
+         * @see Node::embed
          *
          * @return The created Input, which you can pass to disconnect.
          */
@@ -736,7 +737,7 @@ namespace calcgraph {
                 typename OUTPUT<PROPAGATE, single_type>::value_type;
             /**
              * @brief The class to use to represent this object when it's passed
-             * to a Node.embed'ed function.
+             * to a Node::embed'ed function.
              */
             using interface_type =
                 typename OUTPUT<PROPAGATE, single_type>::interface_type;
@@ -774,10 +775,10 @@ namespace calcgraph {
     };
 
     /**
-     * @brief A helper for NodeBuilder.connect, to indicate that the given
+     * @brief A helper for NodeBuilder::connect, to indicate that the given
      * Input shouldn't be connected to anything.
      * @return An appropriately-cast nullptr that can be passed to connect
-     * or NodeBuilder.connect
+     * or NodeBuilder::connect
      */
     template <typename RET>
     inline Connectable<RET> *unconnected() {
@@ -797,12 +798,12 @@ namespace calcgraph {
     }
 
     /**
-     * @brief A Connectable implementation returned by Node.keyed_output.
+     * @brief A Connectable implementation returned by Node::keyed_output.
      * @details This class is thread-safe and can be passed across threads and
      *stored on the heap. It keeps a reference to the Node that created it so
      *it'll never outlive the Node it points to. As Node locks aren't
      *re-entrant, it can't be used from a function passed to its Node's
-     *Node.embed method.
+     *Node::embed method.
      *
      * @tparam value_type The type of values this class can accept.
      */
@@ -884,7 +885,7 @@ namespace calcgraph {
         using value_type = typename RET::second_type;
         /**
          * @brief The class to use to represent this object when it's passed to
-         * a Node.embed'ed function.
+         * a Node::embed'ed function.
          */
         using interface_type = KeyedConnectable<key_type, value_type>;
 
@@ -934,7 +935,7 @@ namespace calcgraph {
         /**
          * @brief Attach the given function to an Input and add that Input to
          *the "unkeyed" list.
-         * @see Node.embed
+         * @see Node::embed
          *
          * @return The created Input, which you can pass to disconnect.
          */
@@ -1184,7 +1185,7 @@ namespace calcgraph {
      * @brief A Work item that evaluates a function, and propages the
      *results to any connected Inputs.
      * @details The key part of the calculation graph - constructed using a
-     * NodeBuilder obtained from Graph.node().
+     * NodeBuilder obtained from Graph::node().
      * @todo This class doesn't support FN functions with a void return type.
      *
      * @tparam PROPAGATE The propagation policy (e.g. Always or OnChange),
@@ -1222,7 +1223,7 @@ namespace calcgraph {
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
-         * Input.append().
+         * Input::append.
          *
          * @tparam N which function argument to get
          */
@@ -1250,7 +1251,7 @@ namespace calcgraph {
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
-         * Input.append(). Note that this method won't schedule the node for
+         * Input::append. Note that this method won't schedule the node for
          * evaluation, so if you want the expanded vector to be processed
          *you should schedule the Node directly.
          *
@@ -1278,7 +1279,7 @@ namespace calcgraph {
          * @details Pass this object to a Connectable object so this Node is
          * evaluated whenever that Connectable changes, or set values on the
          * Input (i.e. pass values to the FN function) directly using
-         * Input.append(). Note that this method won't schedule the node for
+         * Input::append. Note that this method won't schedule the node for
          * evaluation, so if you want the reduced vector to be processed you
          * should schedule the Node directly. The Input must not be used
          *after passed to this method.
@@ -1324,7 +1325,7 @@ namespace calcgraph {
          * @details The returned class is thread-safe and can be passed across
          *threads and stored on the heap. It keeps a reference to this Node so
          *it'll never outlive it. As Node locks aren't re-entrant, it can't be
-         *used from a function passed to its Node's Node.embed method.
+         *used from a function passed to its Node's Node::embed method.
          */
         template <template <template <typename> class, typename>
                   class O = OUTPUT>
@@ -1599,10 +1600,9 @@ namespace calcgraph {
     // see comments in declaration
     void WorkState::add_to_queue(Work &work) {
         // note that the or-equals part of the check is important; if we
-        // failed
-        // to calculate work this time then work.id == current_id, and we
-        // want to put the work back on the graph queue for later
-        // evaluation.
+        // failed to calculate work this time then Work::id ==
+        // WorkState::current_id, and we want to put the work back on the graph
+        // queue for later evaluation.
         if (work.id <= current_id) {
             // process it next Graph()
             work.schedule(g);
@@ -1713,7 +1713,7 @@ namespace calcgraph {
                 return;
             }
 
-            // if we're here we pointed w.next to the head of the queue,
+            // if we're here we pointed w::next to the head of the queue,
             // but something changed the queue before we could finish. The
             // next time round the loop we know current will not be nullptr,
             // so set a flag to skip the are-we-already-queued check.
