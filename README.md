@@ -19,7 +19,7 @@ This example is a good use-case for the framework as:
 - The available maturities aren't available up-front, yet we want to trade all maturities so need to dynamically generate parts of the logic graph.
 - We do need to process the contents of all the UDP datagrams, even if we coalesce market data updates (i.e. only use the latest price for a maturity) for most of the processing.
 
-```
+```c++
 enum TradeSignal { BUY, SELL, HOLD };
 static const char *TradeSignalNames[] = {"BUY", "SELL", "HOLD"};
 
@@ -282,9 +282,37 @@ void build_pipeline(uint8_t maturity, calcgraph::Connectable<double> &price,
 
 ## Getting Started
 
+The `Graph` object contains the work queue of nodes that need evaluating due to changes in their inputs. It's also used to construct new nodes in the calculation graph; `Graph::node()` returns you a builder object that allows you to wrap an existing function and customise the input, propagation and output policies (described below).
+
+### Connecting Logic
+
+Blocks of logic are connected via the `Connectable` and `Input` interfaces. All graph nodes constructed using the builder implement `Connectable`, and all nodes have an `Node::input()` method (with the parameter number as a template parameter) that gives you an Input object. You can also push values into a Node directly using the `Input::append` method (which also takes the `Graph` as a parameter to the node that created the Input can be scheduled for re-evaluation). All Node objects are reference-counted (the builder returns a `boost::intrusive_ptr` to a newly-created Node, giving it an initial reference count of one) and `Input` objects hold a (counted) reference to their creating Node, so an Input can never outlive the Node it belongs to. Passing an `Input` to `Connectable::connect` stores the `Input` in the Connectable object, so a Node will never be deleted if it's still connected to anything (and similiarly, a node will be automatically deleted once it's no longer connected to anything, unless you keep additional `boost::intrusive_ptr`s to it).
+
+### Evaluating the Graph's Work Queue
+
 ### Input Policies
 
+Each node in the calculation graph is responsible for storing its own input values. How they're stored, and how the (and which) values are passed to the node's function is determined by the input policy. Each argument to the function has its own independent input policy, and the initial value of the input (that will be passed to the node's function if no other input values have been receieved) is also configurable via the `NodeBuilder` object. The policies include:
+
+- **Latest**, the most frequently-used policy, stores a single parameter value in an atomic variable. New values just replace the existing stored value, so the graph node's function only sees the most up-to-date value (and may not see every value that's ever been fed to the input). The are partial template specializations of the Latest policy to support `std::shared_ptr` and `boost::intrustive_ptr` values if you need to pass objects to the node's function that can't be stored in a `std::atomic` object. The following `NodeBuilder` arguments add a parameter to the builder object with a `Latest` policy:
+    - **latest(Connectable*, initial = {})** adds a parameter and connects the parameter of any graph node that the builder creates to the given `Connectable` object. It also sets the parameter's initial value to the supplied value (or a default-constructed value, if not given).
+    - **initialize(value)** adds a parameter with the given initial value, but doesn't connect the input to anything
+    - **unconnected()** adds a parameter with a default-constructed initial value and doesn't connect the input to anything
+- **Accumulate** is a policy that stores every new value in a lock-free single-linked list, and when the node's function is evaluated the current contents of the list is passed to the parameter as a `std::forward_list` args. As this is is thread-safe, the input can be connected to multiple sources, and all collected values are passed in the order they are received. To add a parameter with this policy to a `NodeBuilder` builder object, use the `accumulate(Connectable*)` function (optionally specifying a Connectable to wire the node up to when it's created).
+- **Variadic** is for when you want to connect a variable number of inputs to the graph node, but want the values from those inputs to be passed to the node's function as a single `std::vector`. Specifying this policy (via `NodeBuilder::variadic()`) means the created nodes will have `variadic_add` and `variadic_remove` methods, which let you connect and disconnect values from the parameter after the node's constructed.
+
 ### Propagation Policies
+
+Once a node's function is calculated, the node's propagation policy is used to determine whether to pass that value on to any inputs, and, if so, whether to schedule those inputs for re-evaluation by adding them to the `Graph`'s work queue. The policy must have two methods:
+
+- **bool push_value(value)**: A Node stores its input values according to its parameters' input policies; this method is used by a node to determine whether to pass the value that it just calculated to the input policies of its connected nodes (the `Input`s that were stored in the node's output policy when they were passed to the node's `Connectable::connect` implementation).
+- **bool notify()** If `push_value` returns true for a value it is passed to all the node's connected inputs - then `notify()` is called to determine whether to add those inputs to the graph's work queue for subsequent evaluation.
+
+The propagation policy of a node can be changed using the `NodeBuilder::propagate()` parameterized method (before it's constructed), and available policies are:
+
+- **Always** (the default) just returns true for both methods. It passes all values it sees to connected Inputs without any additional processing.
+- **Weak** returns true for `push_value`, so passes every value it sees to the connected Inputs. However, it always returns false for `notify()`, so never schedules downstream nodes for recalcuation.
+- **OnChange** is a more complex policy, and is used to coalesce duplicates to reduce the number of times downstream nodes are calculated (by assuming downstream logic is idempotent). It stores the last value the function evaluated to, and if immediately-following values are equal then `push_value` returns false and the duplicates are dropped. There's an partial specialization for `std::shared_ptr` that determines value equality based on the value pointed to (rather than just the `std::shared_ptr` object itself). 
 
 ### Output Policies
 

@@ -1462,7 +1462,7 @@ namespace calcgraph {
          * @brief Add an argument with an Accumulate input policy
          */
         template <typename VAL>
-        auto accumulate(Connectable<VAL> *arg) {
+        auto accumulate(Connectable<VAL> *arg = nullptr) {
             return doconnect<Accumulate, VAL>(arg);
         }
 
