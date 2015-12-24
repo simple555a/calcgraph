@@ -316,6 +316,14 @@ The propagation policy of a node can be changed using the `NodeBuilder::propagat
 
 ### Output Policies
 
+A node's output policy determines how connected Inputs are stored and how values from the function are passed through to them. They usually embed (one or more copies of) the node's propagation policy to help them make this decision. The policies are:
+
+- **SingleList** (the default) stores the connected Inputs (including duplicates) in a `std::vector`.
+- **MultiValued** wraps another output policy (e.g. `MultiValued<SingleList>::type`), and when invoked iterates over the output of the node's function (using `std::begin` and `std::end`), passing each element iterated over to its nested output policy. This is useful when the node operates on a batch of data, but connected nodes only expect to process the data one-by-one.
+- **Demultiplexed** is the most complex policy. It works with nodes whose functions output a `std::pair` of values, and treats the first element of each value as a key into the `std::unordered_map` of instances of the SingleList output policy it contains. It passes the second element of the pair to the output policy it finds - or if none exists it passes the whole pair to a separate SingleList policy instance for "unkeyed" items. The Node::connect and Node::disconnect functions delegate through to this "unkeyed" policy. Nodes templated with a Demultiplexed output policy also have a `keyed_output` method that takes a key and returns a Connectable object. The implementation of `keyed_output` looks up the given key in the policy's unordered_map, and if it doesn't find it it creates a new instance of the SingleList policy and adds it to the map. The Connectable object the method returns is connected to this SingleList policy, so passing an Input to its `Connectable::connect` or `Connectable::disconnect` methods adds or removes the Input from the SingleList's `std::vector`. This output policy is conceptually the inverse of a variadic input, and takes care only to schedule downstream nodes connected to keyed inputs (i.e. Inputs stored in the policy's unordered_map) if the node's function outputs a value with that key (so the calculation graph nodes attached to unrelated keys aren't needlessly recalculated).
+
+All data structures in all the output policy implementations are guarded by the containing node's lock, so all modifications of these datastructures spin on the lock until it is free.
+
 ## Dependencies
 
 - CalcGraph uses boost intrusive_ptr, a header-only smart pointer library.
