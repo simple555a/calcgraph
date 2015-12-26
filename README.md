@@ -7,7 +7,9 @@ This has several advantages:
 - Parallelism for free: the calculation graph is built with lock-free primitives, so many threads can propagate changes through the graph without blocking or data races, and each node in the graph is guaranteed to only be executed by a single thread at once.
 - Compile-time verification that the application logic is connected correctly, and all parameters to a piece of logic have been connected or explicitly ignored.
 
-### Logic Evaluation
+### Overview
+
+Application logic is broken down into stateless functions, each of which is embedded in a graph "node". The node's "inputs" are connected to the function's parameters and the node's output is connected to the function's return value. The application logic also connects the nodes together (they form a directed cyclic graph), and is responsible for passing external data to the inputs of the relevant nodes. The graph can then be evaluated; all nodes whose inputs have changed have their functions invoked, and their return values are passed into the inputs of any connected nodes. This process continues recursively until there are no nodes left with unprocessed input values.
 
 ## Example: Bond Stat-Arb Trading Bot
 
@@ -290,6 +292,10 @@ Blocks of logic are connected via the `Connectable` and `Input` interfaces. All 
 
 ### Evaluating the Graph's Work Queue
 
+When new values are passed to a graph node via `Input::append`, the Node is scheduled on the graph's work queue. `Graph::operator()()` is a thread-safe method to remove all outstanding work from the queue, and evaluate the "dirty" nodes one by one in the order of their `Work::id` fields. After a dirty node has been evaluated, any connected inputs are always added to the `std::priority_queue` heap of nodes to evaluate (skipping duplicates; i.e. nodes that are already in the heap ready for evaluation), depending on the propagation policy. This node-by-node evaluation continues until the heap is empty, at which point `Graph::operator()()` returns. Now, cycles in the logic graph are expected, so to avoid entering an infinite loop the function only evaluates nodes in strictly monotonically-increasing order. If the next node on the heap has a lower or equal id to the node that was just evaluated, it is removed from the heap and put back on the Graph's work queue.
+
+A helper method `evaluate_repeatedly` repeated calls `Graph::operator()()` on the graph passed as an argument, yielding if the run queue is empty. This method is designed for a dedicated thread to use so it can process graph updates as they come in without blocking, at the cost of fully-utilizing the core the thread is scheduled on.
+
 ### Input Policies
 
 Each node in the calculation graph is responsible for storing its own input values. How they're stored, and how the (and which) values are passed to the node's function is determined by the input policy. Each argument to the function has its own independent input policy, and the initial value of the input (that will be passed to the node's function if no other input values have been receieved) is also configurable via the `NodeBuilder` object. The policies include:
@@ -322,7 +328,7 @@ A node's output policy determines how connected Inputs are stored and how values
 - **MultiValued** wraps another output policy (e.g. `MultiValued<SingleList>::type`), and when invoked iterates over the output of the node's function (using `std::begin` and `std::end`), passing each element iterated over to its nested output policy. This is useful when the node operates on a batch of data, but connected nodes only expect to process the data one-by-one.
 - **Demultiplexed** is the most complex policy. It works with nodes whose functions output a `std::pair` of values, and treats the first element of each value as a key into the `std::unordered_map` of instances of the SingleList output policy it contains. It passes the second element of the pair to the output policy it finds - or if none exists it passes the whole pair to a separate SingleList policy instance for "unkeyed" items. The Node::connect and Node::disconnect functions delegate through to this "unkeyed" policy. Nodes templated with a Demultiplexed output policy also have a `keyed_output` method that takes a key and returns a Connectable object. The implementation of `keyed_output` looks up the given key in the policy's unordered_map, and if it doesn't find it it creates a new instance of the SingleList policy and adds it to the map. The Connectable object the method returns is connected to this SingleList policy, so passing an Input to its `Connectable::connect` or `Connectable::disconnect` methods adds or removes the Input from the SingleList's `std::vector`. This output policy is conceptually the inverse of a variadic input, and takes care only to schedule downstream nodes connected to keyed inputs (i.e. Inputs stored in the policy's unordered_map) if the node's function outputs a value with that key (so the calculation graph nodes attached to unrelated keys aren't needlessly recalculated).
 
-All data structures in all the output policy implementations are guarded by the containing node's lock, so all modifications of these datastructures spin on the lock until it is free.
+All data structures in all the output policy implementations are guarded by the containing node's lock, so all modifications of these datastructures spin on the lock until it is free. This is enforced by the Node itself, so the implementations don't contain any locking logic themselves.
 
 ## Dependencies
 
