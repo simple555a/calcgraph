@@ -1,6 +1,6 @@
 # CalcGraph {#mainpage}
 
-A lightweight C++14 header-only framework for organising application logic to minimise end-to-end calculation latency. This is designed for many frequently-updated inputs and allows you to trade off processing each input value against ensuring the application logic output reflects the most recent inputs.
+A C++14 header-only [dataflow programming](https://en.wikipedia.org/wiki/Dataflow_programming) framework, for organising logic in streaming application to minimise end-to-end calculation latency. This is designed for many frequently-updated inputs and allows you to trade off processing each input value against ensuring the application logic output reflects the most recent inputs.
 
 This has several advantages:
 - Application logic must be stateless (and so easy to unit-test), and any state maintained between invocations is explicitly managed.
